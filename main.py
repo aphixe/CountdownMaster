@@ -63,8 +63,11 @@ class UiSettings:
     day_start_minute: int = 30
     day_end_hour: int = 23
     day_end_minute: int = 0
+    heatmap_color: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
     heatmap_hover_bg_color: QColor = field(default_factory=lambda: QColor("#1f2937"))
     heatmap_hover_text_color: QColor = field(default_factory=lambda: QColor("#f8fafc"))
+    heatmap_hover_cell_color: QColor = field(default_factory=lambda: QColor("#1f2937"))
+    heatmap_cell_size: int = 5
     total_today_color: QColor = field(default_factory=lambda: QColor("#94a3b8"))
     total_today_font_size: int = 20
     goal_left_color: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
@@ -135,6 +138,8 @@ def format_percent(part_seconds: int, goal_seconds: int) -> str:
 
 
 LOGGER = logging.getLogger("countdown")
+HEATMAP_CELL_SIZE_MIN = 2
+HEATMAP_CELL_SIZE_MAX = 20
 
 
 def setup_logging(log_path: str) -> None:
@@ -277,8 +282,15 @@ class SettingsDialog(QDialog):
         self.text_btn = QPushButton()
         self.accent_btn = QPushButton()
         self.day_time_btn = QPushButton()
+        self.heatmap_color_btn = QPushButton()
         self.heatmap_hover_bg_btn = QPushButton()
         self.heatmap_hover_text_btn = QPushButton()
+        self.heatmap_hover_cell_btn = QPushButton()
+        self.heatmap_size_spin = QSpinBox()
+        self.heatmap_size_spin.setRange(
+            HEATMAP_CELL_SIZE_MIN, HEATMAP_CELL_SIZE_MAX
+        )
+        self.heatmap_size_spin.setValue(ui_settings.heatmap_cell_size)
         self.total_today_btn = QPushButton()
         self.goal_left_btn = QPushButton()
         self._sync_color_btns()
@@ -287,11 +299,17 @@ class SettingsDialog(QDialog):
         self.text_btn.clicked.connect(lambda: self._pick_color("text"))
         self.accent_btn.clicked.connect(lambda: self._pick_color("accent"))
         self.day_time_btn.clicked.connect(lambda: self._pick_color("day_time"))
+        self.heatmap_color_btn.clicked.connect(
+            lambda: self._pick_color("heatmap")
+        )
         self.heatmap_hover_bg_btn.clicked.connect(
             lambda: self._pick_color("heatmap_hover_bg")
         )
         self.heatmap_hover_text_btn.clicked.connect(
             lambda: self._pick_color("heatmap_hover_text")
+        )
+        self.heatmap_hover_cell_btn.clicked.connect(
+            lambda: self._pick_color("heatmap_hover_cell")
         )
         self.total_today_btn.clicked.connect(
             lambda: self._pick_color("total_today")
@@ -347,12 +365,23 @@ class SettingsDialog(QDialog):
 
         heatmap_tab = QWidget()
         heatmap_layout = QVBoxLayout()
-        heatmap_group = QGroupBox("Hover")
-        heatmap_form = QFormLayout()
-        heatmap_form.addRow("Background", self.heatmap_hover_bg_btn)
-        heatmap_form.addRow("Text", self.heatmap_hover_text_btn)
-        heatmap_group.setLayout(heatmap_form)
-        heatmap_layout.addWidget(heatmap_group)
+        heatmap_size_group = QGroupBox("Layout")
+        heatmap_size_form = QFormLayout()
+        heatmap_size_form.addRow("Cell Size", self.heatmap_size_spin)
+        heatmap_size_group.setLayout(heatmap_size_form)
+        heatmap_colors_group = QGroupBox("Colors")
+        heatmap_colors_form = QFormLayout()
+        heatmap_colors_form.addRow("Heatmap", self.heatmap_color_btn)
+        heatmap_colors_form.addRow("Hover", self.heatmap_hover_cell_btn)
+        heatmap_colors_group.setLayout(heatmap_colors_form)
+        heatmap_tooltip_group = QGroupBox("Tooltip")
+        heatmap_tooltip_form = QFormLayout()
+        heatmap_tooltip_form.addRow("Background", self.heatmap_hover_bg_btn)
+        heatmap_tooltip_form.addRow("Text", self.heatmap_hover_text_btn)
+        heatmap_tooltip_group.setLayout(heatmap_tooltip_form)
+        heatmap_layout.addWidget(heatmap_size_group)
+        heatmap_layout.addWidget(heatmap_colors_group)
+        heatmap_layout.addWidget(heatmap_tooltip_group)
         heatmap_layout.addStretch(1)
         heatmap_tab.setLayout(heatmap_layout)
 
@@ -381,6 +410,8 @@ class SettingsDialog(QDialog):
             (self.text_btn, self._settings.text_color),
             (self.accent_btn, self._settings.accent_color),
             (self.day_time_btn, self._settings.day_time_color),
+            (self.heatmap_color_btn, self._settings.heatmap_color),
+            (self.heatmap_hover_cell_btn, self._settings.heatmap_hover_cell_color),
             (self.heatmap_hover_bg_btn, self._settings.heatmap_hover_bg_color),
             (self.heatmap_hover_text_btn, self._settings.heatmap_hover_text_color),
             (self.total_today_btn, self._settings.total_today_color),
@@ -398,8 +429,10 @@ class SettingsDialog(QDialog):
             "text": self._settings.text_color,
             "accent": self._settings.accent_color,
             "day_time": self._settings.day_time_color,
+            "heatmap": self._settings.heatmap_color,
             "heatmap_hover_bg": self._settings.heatmap_hover_bg_color,
             "heatmap_hover_text": self._settings.heatmap_hover_text_color,
+            "heatmap_hover_cell": self._settings.heatmap_hover_cell_color,
             "total_today": self._settings.total_today_color,
             "goal_left": self._settings.goal_left_color,
         }[key]
@@ -412,10 +445,14 @@ class SettingsDialog(QDialog):
             self._settings.text_color = color
         elif key == "day_time":
             self._settings.day_time_color = color
+        elif key == "heatmap":
+            self._settings.heatmap_color = color
         elif key == "heatmap_hover_bg":
             self._settings.heatmap_hover_bg_color = color
         elif key == "heatmap_hover_text":
             self._settings.heatmap_hover_text_color = color
+        elif key == "heatmap_hover_cell":
+            self._settings.heatmap_hover_cell_color = color
         elif key == "total_today":
             self._settings.total_today_color = color
         elif key == "goal_left":
@@ -440,8 +477,11 @@ class SettingsDialog(QDialog):
             day_start_minute=self.day_start_minute_spin.value(),
             day_end_hour=self.day_end_hour_spin.value(),
             day_end_minute=self.day_end_minute_spin.value(),
+            heatmap_color=self._settings.heatmap_color,
             heatmap_hover_bg_color=self._settings.heatmap_hover_bg_color,
             heatmap_hover_text_color=self._settings.heatmap_hover_text_color,
+            heatmap_hover_cell_color=self._settings.heatmap_hover_cell_color,
+            heatmap_cell_size=self.heatmap_size_spin.value(),
             total_today_color=self._settings.total_today_color,
             total_today_font_size=self.total_today_font_spin.value(),
             goal_left_color=self._settings.goal_left_color,
@@ -647,7 +687,7 @@ class CountdownWindow(QMainWindow):
             self._acrylic_enabled or self._mac_blur_supported or not self._is_macos
         )
         self._font_family = default_font_family()
-        self._heatmap_cell_size = 5
+        self._heatmap_cell_size = self.settings.heatmap_cell_size
         self._heatmap_spacing = 2
         self._heatmap_year = QDate.currentDate().year()
         self._always_on_top = self.settings.always_on_top
@@ -886,7 +926,11 @@ class CountdownWindow(QMainWindow):
             self.settings.accent_color, self.settings.text_color
         )
         self.toggle_btn.set_state(self.timer.isActive(), animate=False)
-        self._refresh_heatmap()
+        resized = self._set_heatmap_cell_size(
+            self.settings.heatmap_cell_size, save=False
+        )
+        if not resized:
+            self._refresh_heatmap()
         self._update_day_time_label()
         self._update_total_today_label()
         self._update_goal_left_label()
@@ -1031,6 +1075,32 @@ class CountdownWindow(QMainWindow):
             self.raise_()
             self.activateWindow()
 
+    def eventFilter(self, obj, event) -> bool:
+        if (
+            event.type() == QEvent.Wheel
+            and self._is_heatmap_wheel_target(obj)
+        ):
+            if self._handle_heatmap_wheel(event):
+                return True
+        return super().eventFilter(obj, event)
+
+    def _is_heatmap_wheel_target(self, obj) -> bool:
+        if obj is self.heatmap_widget:
+            return True
+        if isinstance(obj, QWidget) and obj.objectName() == "heatmapCell":
+            return True
+        return False
+
+    def _handle_heatmap_wheel(self, event) -> bool:
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return False
+        step = 1 if delta > 0 else -1
+        self._set_heatmap_cell_size(
+            self._heatmap_cell_size + step, save=True
+        )
+        return True
+
     def _restore_after_toggle(self, enabled: bool) -> None:
         if self.isMinimized():
             self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
@@ -1149,6 +1219,10 @@ class CountdownWindow(QMainWindow):
             settings.value("colors/day_time", qcolor_to_hex(ui.day_time_color)),
             ui.day_time_color,
         )
+        ui.heatmap_color = hex_to_qcolor(
+            settings.value("colors/heatmap", qcolor_to_hex(ui.accent_color)),
+            ui.accent_color,
+        )
         ui.heatmap_hover_bg_color = hex_to_qcolor(
             settings.value(
                 "colors/heatmap_hover_bg", qcolor_to_hex(ui.heatmap_hover_bg_color)
@@ -1160,6 +1234,20 @@ class CountdownWindow(QMainWindow):
                 "colors/heatmap_hover_text", qcolor_to_hex(ui.heatmap_hover_text_color)
             ),
             ui.heatmap_hover_text_color,
+        )
+        ui.heatmap_hover_cell_color = hex_to_qcolor(
+            settings.value(
+                "colors/heatmap_hover_cell",
+                qcolor_to_hex(ui.heatmap_hover_bg_color),
+            ),
+            ui.heatmap_hover_bg_color,
+        )
+        ui.heatmap_cell_size = int(
+            settings.value("heatmap/cell_size", ui.heatmap_cell_size)
+        )
+        ui.heatmap_cell_size = max(
+            HEATMAP_CELL_SIZE_MIN,
+            min(HEATMAP_CELL_SIZE_MAX, ui.heatmap_cell_size),
         )
         ui.total_today_color = hex_to_qcolor(
             settings.value("colors/total_today", qcolor_to_hex(ui.total_today_color)),
@@ -1333,6 +1421,7 @@ class CountdownWindow(QMainWindow):
         settings.setValue("colors/text", qcolor_to_hex(self.settings.text_color))
         settings.setValue("colors/accent", qcolor_to_hex(self.settings.accent_color))
         settings.setValue("colors/day_time", qcolor_to_hex(self.settings.day_time_color))
+        settings.setValue("colors/heatmap", qcolor_to_hex(self.settings.heatmap_color))
         settings.setValue(
             "colors/heatmap_hover_bg",
             qcolor_to_hex(self.settings.heatmap_hover_bg_color),
@@ -1341,6 +1430,11 @@ class CountdownWindow(QMainWindow):
             "colors/heatmap_hover_text",
             qcolor_to_hex(self.settings.heatmap_hover_text_color),
         )
+        settings.setValue(
+            "colors/heatmap_hover_cell",
+            qcolor_to_hex(self.settings.heatmap_hover_cell_color),
+        )
+        settings.setValue("heatmap/cell_size", self.settings.heatmap_cell_size)
         settings.setValue(
             "colors/total_today",
             qcolor_to_hex(self.settings.total_today_color),
@@ -1370,6 +1464,22 @@ class CountdownWindow(QMainWindow):
         )
         settings.sync()
 
+    def _set_heatmap_cell_size(self, size: int, save: bool = True) -> bool:
+        clamped = max(HEATMAP_CELL_SIZE_MIN, min(HEATMAP_CELL_SIZE_MAX, int(size)))
+        if clamped == self._heatmap_cell_size:
+            if save and self.settings.heatmap_cell_size != clamped:
+                self.settings.heatmap_cell_size = clamped
+                self._save_settings()
+            return False
+        self._heatmap_cell_size = clamped
+        self.settings.heatmap_cell_size = clamped
+        self._clear_heatmap()
+        self._populate_heatmap_cells(self._heatmap_year)
+        self._refresh_heatmap()
+        if save:
+            self._save_settings()
+        return True
+
     def _build_heatmap(self) -> QWidget:
         self.heatmap_cells: dict[str, QFrame] = {}
         self.heatmap_placeholder_cells: list[QFrame] = []
@@ -1379,7 +1489,9 @@ class CountdownWindow(QMainWindow):
         self.heatmap_layout.setVerticalSpacing(self._heatmap_spacing)
 
         self.heatmap_widget = QWidget()
+        self.heatmap_widget.setObjectName("heatmapWidget")
         self.heatmap_widget.setLayout(self.heatmap_layout)
+        self.heatmap_widget.installEventFilter(self)
         self._populate_heatmap_cells(self._heatmap_year)
         return self.heatmap_widget
 
@@ -1400,6 +1512,7 @@ class CountdownWindow(QMainWindow):
             cell = QFrame()
             cell.setObjectName("heatmapCell")
             cell.setFixedSize(self._heatmap_cell_size, self._heatmap_cell_size)
+            cell.installEventFilter(self)
             self.heatmap_layout.addWidget(cell, row, col)
             if index < leading_blanks or index >= leading_blanks + days_in_year:
                 self._apply_placeholder_style(cell)
@@ -1434,11 +1547,18 @@ class CountdownWindow(QMainWindow):
             self._update_heatmap_cell(key)
 
     def _apply_placeholder_style(self, cell: QFrame) -> None:
-        base = self.settings.accent_color
+        base = self.settings.heatmap_color
         cell.setStyleSheet(self._heatmap_cell_stylesheet(base, 20))
 
+    def _heatmap_base_color(self, date_key: str) -> QColor:
+        date = QDate.fromString(date_key, "yyyy-MM-dd")
+        base = self.settings.heatmap_color
+        if date.isValid() and date.month() % 2 == 0:
+            return base.lighter(125)
+        return base
+
     def _heatmap_cell_stylesheet(self, base: QColor, alpha: int) -> str:
-        hover_bg = qcolor_to_hex(self.settings.heatmap_hover_bg_color)
+        hover_bg = qcolor_to_hex(self.settings.heatmap_hover_cell_color)
         return (
             "QFrame#heatmapCell {"
             "border-radius: 2px;"
@@ -1454,7 +1574,7 @@ class CountdownWindow(QMainWindow):
         cell = self.heatmap_cells.get(date_key)
         if cell is None:
             return
-        base = self.settings.accent_color
+        base = self._heatmap_base_color(date_key)
         seconds = self._total_seconds_for_day(date_key)
         goal_seconds = self._goal_seconds_for_date(date_key)
         if goal_seconds > 0:
