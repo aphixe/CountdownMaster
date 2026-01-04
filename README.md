@@ -56,7 +56,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-On Windows you can also use:
+On Windows you can also use(re-added, this should work if python is in your path):
 
 ```bat
 run.bat
