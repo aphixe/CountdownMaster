@@ -2,8 +2,13 @@
 
 # Countdown Master
 
-Countdown Master is a small desktop timer that combines a countdown goal timer
-with daily goal tracking, a year heatmap, and daily logs. It is built with
+Countdown Master is vibe coded small desktop timer that combines a countdown goal timer
+with daily goal tracking, a year heatmap, and daily logs. I use it for tracking
+my daily immersion, i started using this on day 1 of 2026 and already at 7 hours +
+I know 7 hour isn't the highest for 3 days, but this app has me immersing more,
+today I upped my super goal time to 3 hours, if i didn't i would only be at 6 hours.
+I expect to hit higher numbers now. if you find issues or have features you want, ask or just
+clone and work on it yourself, tho it be cool to see what you add. It is built with
 PySide6 (Qt) and stores data locally in `data.csv` plus preferences in
 `settings.ini`.
 
@@ -19,7 +24,7 @@ PySide6 (Qt) and stores data locally in `data.csv` plus preferences in
 ## Requirements
 
 - Python 3.9+ (PySide6 supports 3.8+)
-- Windows, macOS, or Linux with a desktop environment
+- Windows, macOS, or Linux(will have to virtual machine test Linux) with a desktop environment
 
 Dependencies are listed in `requirements.txt`.
 
