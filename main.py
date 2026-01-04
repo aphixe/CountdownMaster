@@ -1,4 +1,5 @@
 import csv
+import math
 import logging
 import os
 import sys
@@ -16,7 +17,7 @@ from PySide6.QtCore import (
     QVariantAnimation,
     QEasingCurve,
 )
-from PySide6.QtGui import QColor, QFont, QAction, QFontDatabase
+from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -68,10 +69,13 @@ class UiSettings:
     heatmap_hover_text_color: QColor = field(default_factory=lambda: QColor("#f8fafc"))
     heatmap_hover_cell_color: QColor = field(default_factory=lambda: QColor("#1f2937"))
     heatmap_cell_size: int = 5
+    heatmap_month_padding: int = 0
+    heatmap_month_label_size: int = 8
     total_today_color: QColor = field(default_factory=lambda: QColor("#94a3b8"))
     total_today_font_size: int = 20
     goal_left_color: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
     goal_left_font_size: int = 20
+    goal_pulse_seconds: float = 2.0
     always_on_top: bool = False
 
 
@@ -278,6 +282,11 @@ class SettingsDialog(QDialog):
         self.goal_left_font_spin.setRange(10, 48)
         self.goal_left_font_spin.setValue(ui_settings.goal_left_font_size)
 
+        self.goal_pulse_spin = QDoubleSpinBox()
+        self.goal_pulse_spin.setRange(0.2, 10.0)
+        self.goal_pulse_spin.setSingleStep(0.1)
+        self.goal_pulse_spin.setValue(ui_settings.goal_pulse_seconds)
+
         self.bg_btn = QPushButton()
         self.text_btn = QPushButton()
         self.accent_btn = QPushButton()
@@ -291,6 +300,16 @@ class SettingsDialog(QDialog):
             HEATMAP_CELL_SIZE_MIN, HEATMAP_CELL_SIZE_MAX
         )
         self.heatmap_size_spin.setValue(ui_settings.heatmap_cell_size)
+        self.heatmap_month_padding_spin = QSpinBox()
+        self.heatmap_month_padding_spin.setRange(0, 20)
+        self.heatmap_month_padding_spin.setValue(
+            ui_settings.heatmap_month_padding
+        )
+        self.heatmap_month_label_spin = QSpinBox()
+        self.heatmap_month_label_spin.setRange(6, 18)
+        self.heatmap_month_label_spin.setValue(
+            ui_settings.heatmap_month_label_size
+        )
         self.total_today_btn = QPushButton()
         self.goal_left_btn = QPushButton()
         self._sync_color_btns()
@@ -358,8 +377,14 @@ class SettingsDialog(QDialog):
         totals_form.addRow("Goal Left Color", self.goal_left_btn)
         totals_group.setLayout(totals_form)
 
+        pulse_group = QGroupBox("Goal Pulse")
+        pulse_form = QFormLayout()
+        pulse_form.addRow("Glow Duration (sec)", self.goal_pulse_spin)
+        pulse_group.setLayout(pulse_form)
+
         day_layout.addWidget(day_time_group)
         day_layout.addWidget(totals_group)
+        day_layout.addWidget(pulse_group)
         day_layout.addStretch(1)
         day_tab.setLayout(day_layout)
 
@@ -368,6 +393,12 @@ class SettingsDialog(QDialog):
         heatmap_size_group = QGroupBox("Layout")
         heatmap_size_form = QFormLayout()
         heatmap_size_form.addRow("Cell Size", self.heatmap_size_spin)
+        heatmap_size_form.addRow(
+            "Month Padding", self.heatmap_month_padding_spin
+        )
+        heatmap_size_form.addRow(
+            "Month Label Size", self.heatmap_month_label_spin
+        )
         heatmap_size_group.setLayout(heatmap_size_form)
         heatmap_colors_group = QGroupBox("Colors")
         heatmap_colors_form = QFormLayout()
@@ -482,10 +513,13 @@ class SettingsDialog(QDialog):
             heatmap_hover_text_color=self._settings.heatmap_hover_text_color,
             heatmap_hover_cell_color=self._settings.heatmap_hover_cell_color,
             heatmap_cell_size=self.heatmap_size_spin.value(),
+            heatmap_month_padding=self.heatmap_month_padding_spin.value(),
+            heatmap_month_label_size=self.heatmap_month_label_spin.value(),
             total_today_color=self._settings.total_today_color,
             total_today_font_size=self.total_today_font_spin.value(),
             goal_left_color=self._settings.goal_left_color,
             goal_left_font_size=self.goal_left_font_spin.value(),
+            goal_pulse_seconds=self.goal_pulse_spin.value(),
             always_on_top=self._settings.always_on_top,
         )
 
@@ -497,9 +531,13 @@ class AnimatedToggleButton(QPushButton):
         self._inactive_color = QColor("#e5e7eb")
         self._bg_color = self._inactive_color
         self._text_color = QColor("#0b0f14")
-        self._base_padding_y = 8
-        self._base_padding_x = 16
-        self._radius = 10
+        self._default_padding_y = 8
+        self._default_padding_x = 16
+        self._default_radius = 10
+        self._default_height = 38
+        self._base_padding_y = self._default_padding_y
+        self._base_padding_x = self._default_padding_x
+        self._radius = self._default_radius
         self._press_value = 0.0
         self._is_active = False
 
@@ -514,7 +552,7 @@ class AnimatedToggleButton(QPushButton):
         self._press_anim.valueChanged.connect(self._on_press_anim)
 
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(38)
+        self.setFixedHeight(self._default_height)
         self._update_style()
 
     def set_colors(self, inactive: QColor, active: QColor) -> None:
@@ -567,6 +605,15 @@ class AnimatedToggleButton(QPushButton):
             f"color: {qcolor_to_hex(self._text_color)};"
         )
 
+    def set_scale(self, scale: float) -> None:
+        scale = max(0.6, min(2.0, float(scale)))
+        self._base_padding_y = max(4, int(self._default_padding_y * scale))
+        self._base_padding_x = max(6, int(self._default_padding_x * scale))
+        self._radius = max(6, int(self._default_radius * scale))
+        height = max(28, int(self._default_height * scale))
+        self.setFixedHeight(height)
+        self._update_style()
+
     def mousePressEvent(self, event) -> None:
         self._animate_press(1.0)
         super().mousePressEvent(event)
@@ -578,6 +625,45 @@ class AnimatedToggleButton(QPushButton):
     def leaveEvent(self, event) -> None:
         self._animate_press(0.0)
         super().leaveEvent(event)
+
+
+class GlowFrame(QFrame):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._intensity = 0.0
+        self._color = QColor("#ff3b30")
+        self._radius = 18
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+    def set_intensity(self, value: float) -> None:
+        value = max(0.0, min(1.0, float(value)))
+        if abs(self._intensity - value) < 0.001:
+            return
+        self._intensity = value
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if self._intensity <= 0.0:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        base = QColor(self._color)
+        layers = [
+            (8, 50),
+            (5, 90),
+            (2, 180),
+        ]
+        for width, alpha in layers:
+            color = QColor(base)
+            color.setAlpha(int(alpha * self._intensity))
+            pen = QPen(color, width)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            inset = int(width / 2) + 1
+            rect = self.rect().adjusted(inset, inset, -inset, -inset)
+            painter.drawRoundedRect(rect, self._radius, self._radius)
 
 
 class LogsDialog(QDialog):
@@ -663,6 +749,7 @@ class CountdownWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Goal Timer")
         self.setMinimumSize(420, 300)
+        self._base_window_size = self.minimumSize()
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
@@ -687,10 +774,21 @@ class CountdownWindow(QMainWindow):
             self._acrylic_enabled or self._mac_blur_supported or not self._is_macos
         )
         self._font_family = default_font_family()
+        self._heatmap_base_size = self.settings.heatmap_cell_size
         self._heatmap_cell_size = self.settings.heatmap_cell_size
+        self._heatmap_month_padding_base = self.settings.heatmap_month_padding
+        self._heatmap_month_padding = self.settings.heatmap_month_padding
+        self._heatmap_month_label_size_base = self.settings.heatmap_month_label_size
+        self._heatmap_month_label_size = self.settings.heatmap_month_label_size
+        self._heatmap_label_height = max(
+            10, self._heatmap_month_label_size + 6
+        )
+        self._heatmap_label_spacing_base = 4
+        self._heatmap_label_spacing = self._heatmap_label_spacing_base
         self._heatmap_spacing = 2
         self._heatmap_year = QDate.currentDate().year()
         self._always_on_top = self.settings.always_on_top
+        self._scale_factor = 1.0
 
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
@@ -702,6 +800,18 @@ class CountdownWindow(QMainWindow):
         self.day_time_timer.start()
 
         self._build_ui()
+        self._window_save_timer = QTimer(self)
+        self._window_save_timer.setSingleShot(True)
+        self._window_save_timer.setInterval(250)
+        self._window_save_timer.timeout.connect(self._save_window_geometry)
+        self._restore_window_geometry()
+        self._goal_pulse_anim = QVariantAnimation(self)
+        self._goal_pulse_anim.setDuration(2000)
+        self._goal_pulse_anim.setEasingCurve(QEasingCurve.InOutSine)
+        self._goal_pulse_anim.setStartValue(0.0)
+        self._goal_pulse_anim.setEndValue(1.0)
+        self._goal_pulse_anim.valueChanged.connect(self._on_goal_pulse_value)
+        self._goal_pulse_anim.finished.connect(self._on_goal_pulse_finished)
         self._apply_settings()
         if self._always_on_top:
             self._toggle_always_on_top(True, save=False)
@@ -739,8 +849,12 @@ class CountdownWindow(QMainWindow):
         self.total_today_label.setObjectName("totalTodayLabel")
 
         self.goal_left_label = QLabel("Goal left: please set goal")
-        self.goal_left_label.setAlignment(Qt.AlignCenter)
+        self.goal_left_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.goal_left_label.setObjectName("goalLeftLabel")
+
+        self.year_total_label = QLabel("Year total: 0d 00:00:00")
+        self.year_total_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.year_total_label.setObjectName("yearTotalLabel")
 
         self.status_label = QLabel("Right click to set goal time")
         self.status_label.setAlignment(Qt.AlignCenter)
@@ -762,12 +876,22 @@ class CountdownWindow(QMainWindow):
         content_layout.addWidget(self.timer_label)
         content_layout.addWidget(self.day_time_label)
         content_layout.addWidget(self.total_today_label)
-        content_layout.addWidget(self.goal_left_label)
+        goal_row = QWidget()
+        goal_row_layout = QHBoxLayout()
+        goal_row_layout.setContentsMargins(0, 0, 0, 0)
+        goal_row_layout.setSpacing(12)
+        goal_row_layout.addWidget(self.goal_left_label)
+        goal_row_layout.addStretch(1)
+        goal_row_layout.addWidget(self.year_total_label)
+        goal_row.setLayout(goal_row_layout)
+        content_layout.addWidget(goal_row)
         content_layout.addWidget(self.heatmap_widget, alignment=Qt.AlignCenter)
         content_layout.addWidget(self.status_label)
         content_layout.addLayout(button_row)
         content_layout.addStretch(1)
         content.setLayout(content_layout)
+
+        self.glow_frame = GlowFrame()
 
         stack = QStackedLayout()
         stack.setStackingMode(QStackedLayout.StackAll)
@@ -776,6 +900,7 @@ class CountdownWindow(QMainWindow):
             stack.addWidget(self.mac_visual_effect)
         stack.addWidget(self.background)
         stack.addWidget(content)
+        stack.addWidget(self.glow_frame)
         self.central.setLayout(stack)
 
     def _show_context_menu(self, pos) -> None:
@@ -784,7 +909,7 @@ class CountdownWindow(QMainWindow):
 
     def _build_context_menu(self):
         menu = QMenu(self)
-        set_time = QAction("Set Time", self)
+        set_time = QAction("Set Current Goal", self)
         set_super_goal = QAction("Set Daily Super Goal", self)
         logs = QAction("Logs", self)
         always_on_top = QAction("Always On Top", self)
@@ -883,21 +1008,6 @@ class CountdownWindow(QMainWindow):
             self.setWindowOpacity(self.settings.opacity)
             if self.blur_effect is not None:
                 self.blur_effect.setBlurRadius(blur_radius)
-        self.timer_label.setFont(
-            QFont(self._font_family, self.settings.font_size, QFont.Bold)
-        )
-        self.status_label.setFont(
-            QFont(self._font_family, self.settings.label_size)
-        )
-        self.day_time_label.setFont(
-            QFont(self._font_family, self.settings.day_time_font_size)
-        )
-        self.total_today_label.setFont(
-            QFont(self._font_family, self.settings.total_today_font_size)
-        )
-        self.goal_left_label.setFont(
-            QFont(self._font_family, self.settings.goal_left_font_size)
-        )
 
         self.timer_label.setStyleSheet(
             f"color: {qcolor_to_hex(self.settings.text_color)};"
@@ -914,6 +1024,12 @@ class CountdownWindow(QMainWindow):
         self.goal_left_label.setStyleSheet(
             f"color: {qcolor_to_hex(self.settings.goal_left_color)};"
         )
+        self.year_total_label.setStyleSheet(
+            f"color: {qcolor_to_hex(self.settings.total_today_color)};"
+        )
+        self._goal_pulse_anim.setDuration(
+            max(200, int(self.settings.goal_pulse_seconds * 1000))
+        )
         self.setStyleSheet(
             "QToolTip {"
             f"background-color: {qcolor_to_hex(self.settings.heatmap_hover_bg_color)};"
@@ -926,9 +1042,10 @@ class CountdownWindow(QMainWindow):
             self.settings.accent_color, self.settings.text_color
         )
         self.toggle_btn.set_state(self.timer.isActive(), animate=False)
-        resized = self._set_heatmap_cell_size(
-            self.settings.heatmap_cell_size, save=False
-        )
+        self._heatmap_base_size = self.settings.heatmap_cell_size
+        self._heatmap_month_padding_base = self.settings.heatmap_month_padding
+        self._heatmap_month_label_size_base = self.settings.heatmap_month_label_size
+        resized = self._apply_scaled_metrics()
         if not resized:
             self._refresh_heatmap()
         self._update_day_time_label()
@@ -957,6 +1074,82 @@ class CountdownWindow(QMainWindow):
                 "}"
             )
 
+    def _apply_scaled_metrics(self) -> bool:
+        self._update_scale_factor()
+        scale = self._scale_factor
+        timer_size = max(10, int(self.settings.font_size * scale))
+        label_size = max(8, int(self.settings.label_size * scale))
+        day_time_size = max(8, int(self.settings.day_time_font_size * scale))
+        total_today_size = max(8, int(self.settings.total_today_font_size * scale))
+        goal_left_size = max(8, int(self.settings.goal_left_font_size * scale))
+        self.timer_label.setFont(
+            QFont(self._font_family, timer_size, QFont.Bold)
+        )
+        self.status_label.setFont(QFont(self._font_family, label_size))
+        self.day_time_label.setFont(QFont(self._font_family, day_time_size))
+        self.total_today_label.setFont(
+            QFont(self._font_family, total_today_size)
+        )
+        self.goal_left_label.setFont(
+            QFont(self._font_family, goal_left_size)
+        )
+        self.year_total_label.setFont(
+            QFont(self._font_family, goal_left_size)
+        )
+        self.toggle_btn.set_scale(scale)
+        self._heatmap_month_label_size = max(
+            6, int(self._heatmap_month_label_size_base * scale)
+        )
+        self._heatmap_label_height = max(
+            10, self._heatmap_month_label_size + 6
+        )
+        self._heatmap_label_spacing = max(
+            0, int(round(self._heatmap_label_spacing_base * scale))
+        )
+        if self.heatmap_container_layout is not None:
+            self.heatmap_container_layout.setSpacing(
+                self._heatmap_label_spacing
+            )
+        resized = self._apply_scaled_heatmap_size()
+        self._update_month_label_style()
+        return resized
+
+    def _update_scale_factor(self) -> None:
+        base_width = max(1, self._base_window_size.width())
+        base_height = max(1, self._base_window_size.height())
+        scale = min(self.width() / base_width, self.height() / base_height)
+        self._scale_factor = max(0.75, min(2.0, scale))
+
+    def _apply_scaled_heatmap_size(self) -> bool:
+        scaled_size = int(round(self._heatmap_base_size * self._scale_factor))
+        scaled_padding = int(
+            round(self._heatmap_month_padding_base * self._scale_factor)
+        )
+        return self._apply_heatmap_geometry(scaled_size, scaled_padding)
+
+    def _update_month_label_style(self) -> None:
+        if not hasattr(self, "month_label_widgets"):
+            return
+        font = QFont(self._font_family, self._heatmap_month_label_size)
+        color = qcolor_to_hex(self.settings.day_time_color)
+        for label in self.month_label_widgets:
+            label.setFont(font)
+            label.setStyleSheet(f"color: {color};")
+        if getattr(self, "month_labels_widget", None) is not None:
+            self.month_labels_widget.setFixedHeight(
+                self._heatmap_label_height
+            )
+        if (
+            getattr(self, "heatmap_grid_widget", None) is not None
+            and getattr(self, "heatmap_widget", None) is not None
+        ):
+            total_height = (
+                self.heatmap_grid_widget.height()
+                + self._heatmap_label_height
+                + self._heatmap_label_spacing
+            )
+            self.heatmap_widget.setFixedHeight(total_height)
+
     def _toggle_timer(self) -> None:
         if self.timer.isActive():
             self.timer.stop()
@@ -978,29 +1171,60 @@ class CountdownWindow(QMainWindow):
 
     def _tick(self) -> None:
         if self.remaining_seconds <= 0:
-            self.timer.stop()
-            self.timer_active = False
-            self.status_label.setText("Time's up!")
-            self._finalize_session()
-            self.toggle_btn.setText("Start")
-            self.toggle_btn.set_state(False)
+            self._handle_time_up()
             return
         self.remaining_seconds -= 1
         self._record_super_goal_progress(1)
         self._update_timer_label()
         if self.remaining_seconds <= 0:
-            self.timer.stop()
-            self.timer_active = False
-            self.status_label.setText("Time's up!")
-            self._finalize_session()
-            self.toggle_btn.setText("Start")
-            self.toggle_btn.set_state(False)
+            self._handle_time_up()
 
     def _update_timer_label(self) -> None:
         hours = self.remaining_seconds // 3600
         minutes = (self.remaining_seconds % 3600) // 60
         seconds = self.remaining_seconds % 60
         self.timer_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+
+    def _handle_time_up(self) -> None:
+        self.timer.stop()
+        self.timer_active = False
+        self.status_label.setText("Time's up!")
+        self._finalize_session()
+        self.toggle_btn.setText("Start")
+        self.toggle_btn.set_state(False)
+        self._trigger_goal_pulse()
+        self._trigger_attention()
+
+    def _trigger_goal_pulse(self) -> None:
+        if self.settings.goal_pulse_seconds <= 0:
+            return
+        if self._goal_pulse_anim.state() == QVariantAnimation.Running:
+            self._goal_pulse_anim.stop()
+        self._goal_pulse_anim.start()
+
+    def _trigger_attention(self) -> None:
+        if sys.platform not in ("win32", "darwin"):
+            return
+        duration_ms = max(
+            200, int(max(0.0, self.settings.goal_pulse_seconds) * 1000)
+        )
+        if duration_ms == 0:
+            duration_ms = 2000
+        try:
+            QApplication.alert(self, duration_ms)
+        except Exception:
+            LOGGER.exception("Failed to request OS attention")
+
+    def _on_goal_pulse_value(self, value) -> None:
+        try:
+            t = float(value)
+        except (TypeError, ValueError):
+            return
+        intensity = math.sin(math.pi * t)
+        self.glow_frame.set_intensity(intensity)
+
+    def _on_goal_pulse_finished(self) -> None:
+        self.glow_frame.set_intensity(0.0)
 
     def _update_day_time_label(self) -> None:
         now = QDateTime.currentDateTime()
@@ -1030,6 +1254,7 @@ class CountdownWindow(QMainWindow):
             f"{total_seconds % 60:02d}"
         )
         self._update_goal_left_label()
+        self._update_year_total_label()
 
     def _update_goal_left_label(self) -> None:
         date_key = self._date_key(QDate.currentDate())
@@ -1043,6 +1268,28 @@ class CountdownWindow(QMainWindow):
             f"Goal left: {remaining // 3600:02d}:"
             f"{(remaining % 3600) // 60:02d}:"
             f"{remaining % 60:02d}"
+        )
+
+    def _update_year_total_label(self) -> None:
+        current_year = QDate.currentDate().year()
+        year_prefix = f"{current_year}-"
+        total_seconds = sum(
+            seconds
+            for date_key, seconds in self.daily_totals.items()
+            if date_key.startswith(year_prefix)
+        )
+        if (
+            self._active_session_date_key
+            and self._active_session_date_key.startswith(year_prefix)
+        ):
+            total_seconds += self._active_session_seconds
+        days = total_seconds // 86400
+        remainder = total_seconds % 86400
+        hours = remainder // 3600
+        minutes = (remainder % 3600) // 60
+        seconds = remainder % 60
+        self.year_total_label.setText(
+            f"Year total: {days}d {hours:02d}:{minutes:02d}:{seconds:02d}"
         )
 
     def _toggle_always_on_top(self, enabled: bool, save: bool = True) -> None:
@@ -1075,6 +1322,19 @@ class CountdownWindow(QMainWindow):
             self.raise_()
             self.activateWindow()
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_scaled_metrics()
+        self._schedule_window_save()
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._schedule_window_save()
+
+    def closeEvent(self, event) -> None:
+        self._save_window_geometry()
+        super().closeEvent(event)
+
     def eventFilter(self, obj, event) -> bool:
         if (
             event.type() == QEvent.Wheel
@@ -1087,6 +1347,10 @@ class CountdownWindow(QMainWindow):
     def _is_heatmap_wheel_target(self, obj) -> bool:
         if obj is self.heatmap_widget:
             return True
+        if obj is self.heatmap_grid_widget:
+            return True
+        if obj is self.month_labels_widget:
+            return True
         if isinstance(obj, QWidget) and obj.objectName() == "heatmapCell":
             return True
         return False
@@ -1096,8 +1360,8 @@ class CountdownWindow(QMainWindow):
         if delta == 0:
             return False
         step = 1 if delta > 0 else -1
-        self._set_heatmap_cell_size(
-            self._heatmap_cell_size + step, save=True
+        self._set_base_heatmap_cell_size(
+            self._heatmap_base_size + step, save=True
         )
         return True
 
@@ -1249,6 +1513,16 @@ class CountdownWindow(QMainWindow):
             HEATMAP_CELL_SIZE_MIN,
             min(HEATMAP_CELL_SIZE_MAX, ui.heatmap_cell_size),
         )
+        ui.heatmap_month_padding = int(
+            settings.value("heatmap/month_padding", ui.heatmap_month_padding)
+        )
+        ui.heatmap_month_padding = max(0, ui.heatmap_month_padding)
+        ui.heatmap_month_label_size = int(
+            settings.value(
+                "heatmap/month_label_size", ui.heatmap_month_label_size
+            )
+        )
+        ui.heatmap_month_label_size = max(6, ui.heatmap_month_label_size)
         ui.total_today_color = hex_to_qcolor(
             settings.value("colors/total_today", qcolor_to_hex(ui.total_today_color)),
             ui.total_today_color,
@@ -1267,6 +1541,9 @@ class CountdownWindow(QMainWindow):
         )
         ui.goal_left_font_size = int(
             settings.value("fonts/goal_left", ui.goal_left_font_size)
+        )
+        ui.goal_pulse_seconds = float(
+            settings.value("goal_pulse/seconds", ui.goal_pulse_seconds)
         )
         ui.always_on_top = parse_bool(
             settings.value("window/always_on_top", ui.always_on_top),
@@ -1413,6 +1690,47 @@ class CountdownWindow(QMainWindow):
                     ]
                 )
 
+    def _read_int_setting(
+        self,
+        settings: QSettings,
+        key: str,
+        fallback: Optional[int],
+    ) -> Optional[int]:
+        value = settings.value(key, fallback)
+        if value is None:
+            return fallback
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    def _restore_window_geometry(self) -> None:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        width = self._read_int_setting(settings, "window/width", None)
+        height = self._read_int_setting(settings, "window/height", None)
+        if width is not None and height is not None:
+            width = max(width, self.minimumWidth())
+            height = max(height, self.minimumHeight())
+            self.resize(width, height)
+        pos_x = self._read_int_setting(settings, "window/x", None)
+        pos_y = self._read_int_setting(settings, "window/y", None)
+        if pos_x is not None and pos_y is not None:
+            self.move(pos_x, pos_y)
+
+    def _save_window_geometry(self) -> None:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        rect = self.geometry()
+        settings.setValue("window/x", rect.x())
+        settings.setValue("window/y", rect.y())
+        settings.setValue("window/width", rect.width())
+        settings.setValue("window/height", rect.height())
+        settings.sync()
+
+    def _schedule_window_save(self) -> None:
+        if self._window_save_timer is None:
+            return
+        self._window_save_timer.start()
+
     def _save_settings(self) -> None:
         settings = QSettings("settings.ini", QSettings.IniFormat)
         settings.setValue("blur/radius", self.settings.blur_radius)
@@ -1436,6 +1754,12 @@ class CountdownWindow(QMainWindow):
         )
         settings.setValue("heatmap/cell_size", self.settings.heatmap_cell_size)
         settings.setValue(
+            "heatmap/month_padding", self.settings.heatmap_month_padding
+        )
+        settings.setValue(
+            "heatmap/month_label_size", self.settings.heatmap_month_label_size
+        )
+        settings.setValue(
             "colors/total_today",
             qcolor_to_hex(self.settings.total_today_color),
         )
@@ -1448,6 +1772,7 @@ class CountdownWindow(QMainWindow):
         settings.setValue("fonts/day_time", self.settings.day_time_font_size)
         settings.setValue("fonts/total_today", self.settings.total_today_font_size)
         settings.setValue("fonts/goal_left", self.settings.goal_left_font_size)
+        settings.setValue("goal_pulse/seconds", self.settings.goal_pulse_seconds)
         settings.setValue("window/always_on_top", int(self.settings.always_on_top))
         settings.setValue("day_time/start_hour", self.settings.day_start_hour)
         settings.setValue("day_time/start_minute", self.settings.day_start_minute)
@@ -1464,67 +1789,176 @@ class CountdownWindow(QMainWindow):
         )
         settings.sync()
 
-    def _set_heatmap_cell_size(self, size: int, save: bool = True) -> bool:
+    def _apply_heatmap_geometry(self, size: int, month_padding: int) -> bool:
         clamped = max(HEATMAP_CELL_SIZE_MIN, min(HEATMAP_CELL_SIZE_MAX, int(size)))
-        if clamped == self._heatmap_cell_size:
-            if save and self.settings.heatmap_cell_size != clamped:
-                self.settings.heatmap_cell_size = clamped
-                self._save_settings()
+        padding = max(0, int(month_padding))
+        if (
+            clamped == self._heatmap_cell_size
+            and padding == self._heatmap_month_padding
+        ):
             return False
         self._heatmap_cell_size = clamped
-        self.settings.heatmap_cell_size = clamped
+        self._heatmap_month_padding = padding
         self._clear_heatmap()
         self._populate_heatmap_cells(self._heatmap_year)
         self._refresh_heatmap()
+        return True
+
+    def _set_base_heatmap_cell_size(self, size: int, save: bool = True) -> bool:
+        clamped = max(HEATMAP_CELL_SIZE_MIN, min(HEATMAP_CELL_SIZE_MAX, int(size)))
+        if clamped == self._heatmap_base_size:
+            if save and self.settings.heatmap_cell_size != clamped:
+                self.settings.heatmap_cell_size = clamped
+                self._save_settings()
+            return self._apply_scaled_heatmap_size()
+        self._heatmap_base_size = clamped
+        self.settings.heatmap_cell_size = clamped
+        resized = self._apply_scaled_heatmap_size()
         if save:
             self._save_settings()
-        return True
+        return resized
 
     def _build_heatmap(self) -> QWidget:
         self.heatmap_cells: dict[str, QFrame] = {}
         self.heatmap_placeholder_cells: list[QFrame] = []
+        self.month_label_widgets: list[QLabel] = []
+        self.month_label_spacers: list[QFrame] = []
+        self.month_labels_layout = QGridLayout()
+        self.month_labels_layout.setContentsMargins(0, 0, 0, 0)
+        self.month_labels_layout.setHorizontalSpacing(self._heatmap_spacing)
+        self.month_labels_layout.setVerticalSpacing(0)
+        self.month_labels_widget = QWidget()
+        self.month_labels_widget.setObjectName("heatmapMonthLabels")
+        self.month_labels_widget.setLayout(self.month_labels_layout)
+        self.month_labels_widget.installEventFilter(self)
+
         self.heatmap_layout = QGridLayout()
         self.heatmap_layout.setContentsMargins(0, 0, 0, 0)
         self.heatmap_layout.setHorizontalSpacing(self._heatmap_spacing)
         self.heatmap_layout.setVerticalSpacing(self._heatmap_spacing)
 
+        self.heatmap_grid_widget = QWidget()
+        self.heatmap_grid_widget.setObjectName("heatmapGrid")
+        self.heatmap_grid_widget.setLayout(self.heatmap_layout)
+        self.heatmap_grid_widget.installEventFilter(self)
+
         self.heatmap_widget = QWidget()
         self.heatmap_widget.setObjectName("heatmapWidget")
-        self.heatmap_widget.setLayout(self.heatmap_layout)
+        self.heatmap_container_layout = QVBoxLayout()
+        self.heatmap_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.heatmap_container_layout.setSpacing(self._heatmap_label_spacing)
+        self.heatmap_container_layout.addWidget(self.month_labels_widget)
+        self.heatmap_container_layout.addWidget(self.heatmap_grid_widget)
+        self.heatmap_widget.setLayout(self.heatmap_container_layout)
         self.heatmap_widget.installEventFilter(self)
         self._populate_heatmap_cells(self._heatmap_year)
         return self.heatmap_widget
 
     def _populate_heatmap_cells(self, year: int) -> None:
-        start_date = QDate(year, 1, 1)
-        days_in_year = start_date.daysInYear()
-        leading_blanks = start_date.dayOfWeek() - 1
-        total_cells = leading_blanks + days_in_year
-        trailing_blanks = (7 - (total_cells % 7)) % 7
-        total_cells += trailing_blanks
-        weeks = total_cells // 7
+        for idx in range(self.month_labels_layout.columnCount()):
+            self.month_labels_layout.setColumnMinimumWidth(idx, 0)
+        for idx in range(self.heatmap_layout.columnCount()):
+            self.heatmap_layout.setColumnMinimumWidth(idx, 0)
+
+        month_names = [
+            "Jan",
+            "Feb",
+            "Mar",
+            "Apr",
+            "May",
+            "Jun",
+            "Jul",
+            "Aug",
+            "Sep",
+            "Oct",
+            "Nov",
+            "Dec",
+        ]
+        label_font = QFont(self._font_family, self._heatmap_month_label_size)
+        label_color = qcolor_to_hex(self.settings.day_time_color)
+        col = 0
+        spacer_count = 0
+        column_widths: list[int] = []
 
         self.heatmap_cells.clear()
         self.heatmap_placeholder_cells.clear()
-        for index in range(total_cells):
-            row = index % 7
-            col = index // 7
-            cell = QFrame()
-            cell.setObjectName("heatmapCell")
-            cell.setFixedSize(self._heatmap_cell_size, self._heatmap_cell_size)
-            cell.installEventFilter(self)
-            self.heatmap_layout.addWidget(cell, row, col)
-            if index < leading_blanks or index >= leading_blanks + days_in_year:
-                self._apply_placeholder_style(cell)
-                self.heatmap_placeholder_cells.append(cell)
-            else:
-                date = start_date.addDays(index - leading_blanks)
-                self.heatmap_cells[self._date_key(date)] = cell
+        for month in range(1, 13):
+            first_date = QDate(year, month, 1)
+            if not first_date.isValid():
+                continue
+            days_in_month = first_date.daysInMonth()
+            leading_blanks = first_date.dayOfWeek() - 1
+            total_cells = leading_blanks + days_in_month
+            trailing_blanks = (7 - (total_cells % 7)) % 7
+            weeks = (total_cells + trailing_blanks) // 7
 
-        width = weeks * self._heatmap_cell_size + (weeks - 1) * self._heatmap_spacing
+            label = QLabel(month_names[month - 1])
+            label.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+            label.setFont(label_font)
+            label.setStyleSheet(f"color: {label_color};")
+            label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self.month_labels_layout.addWidget(
+                label, 0, col, 1, weeks, Qt.AlignHCenter | Qt.AlignVCenter
+            )
+            self.month_label_widgets.append(label)
+
+            for week in range(weeks):
+                column_widths.append(self._heatmap_cell_size)
+                for row in range(7):
+                    day_index = week * 7 + row - leading_blanks
+                    cell = QFrame()
+                    cell.setObjectName("heatmapCell")
+                    cell.setFixedSize(
+                        self._heatmap_cell_size, self._heatmap_cell_size
+                    )
+                    cell.installEventFilter(self)
+                    self.heatmap_layout.addWidget(cell, row, col + week)
+                    if day_index < 0 or day_index >= days_in_month:
+                        self._apply_placeholder_style(cell)
+                        self.heatmap_placeholder_cells.append(cell)
+                    else:
+                        date = first_date.addDays(day_index)
+                        self.heatmap_cells[self._date_key(date)] = cell
+            col += weeks
+
+            if self._heatmap_month_padding > 0 and month < 12:
+                spacer = QFrame()
+                spacer.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                spacer.setFixedWidth(self._heatmap_month_padding)
+                self.heatmap_layout.addWidget(spacer, 0, col, 7, 1)
+                self.month_label_spacers.append(spacer)
+                spacer_label = QFrame()
+                spacer_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                spacer_label.setFixedWidth(self._heatmap_month_padding)
+                self.month_labels_layout.addWidget(spacer_label, 0, col)
+                self.month_label_spacers.append(spacer_label)
+                column_widths.append(self._heatmap_month_padding)
+                spacer_count += 1
+                col += 1
+
+        total_columns = len(column_widths)
+        for idx, width in enumerate(column_widths):
+            self.month_labels_layout.setColumnMinimumWidth(idx, width)
+            self.heatmap_layout.setColumnMinimumWidth(idx, width)
+
+        cell_columns = total_columns - spacer_count
+        width = (
+            cell_columns * self._heatmap_cell_size
+            + spacer_count * self._heatmap_month_padding
+            + (total_columns - 1) * self._heatmap_spacing
+        )
         height = 7 * self._heatmap_cell_size + 6 * self._heatmap_spacing
+        total_height = height + self._heatmap_label_height
+        if self._heatmap_label_spacing > 0:
+            total_height += self._heatmap_label_spacing
+        if self.heatmap_grid_widget is not None:
+            self.heatmap_grid_widget.setFixedSize(width, height)
+        if self.month_labels_widget is not None:
+            self.month_labels_widget.setFixedSize(
+                width, self._heatmap_label_height
+            )
         if self.heatmap_widget is not None:
-            self.heatmap_widget.setFixedSize(width, height)
+            self.heatmap_widget.setFixedSize(width, total_height)
 
     def _clear_heatmap(self) -> None:
         while self.heatmap_layout.count():
@@ -1532,8 +1966,15 @@ class CountdownWindow(QMainWindow):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        while self.month_labels_layout.count():
+            item = self.month_labels_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
         self.heatmap_cells.clear()
         self.heatmap_placeholder_cells.clear()
+        self.month_label_widgets.clear()
+        self.month_label_spacers.clear()
 
     def _refresh_heatmap(self) -> None:
         current_year = QDate.currentDate().year()
@@ -1547,8 +1988,12 @@ class CountdownWindow(QMainWindow):
             self._update_heatmap_cell(key)
 
     def _apply_placeholder_style(self, cell: QFrame) -> None:
-        base = self.settings.heatmap_color
-        cell.setStyleSheet(self._heatmap_cell_stylesheet(base, 20))
+        cell.setStyleSheet(
+            "QFrame#heatmapCell {"
+            "border-radius: 2px;"
+            "background-color: rgba(0, 0, 0, 0);"
+            "}"
+        )
 
     def _heatmap_base_color(self, date_key: str) -> QColor:
         date = QDate.fromString(date_key, "yyyy-MM-dd")
