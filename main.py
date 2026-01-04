@@ -54,28 +54,28 @@ except Exception:
 class UiSettings:
     blur_radius: int = 14
     opacity: float = 0.85
-    bg_color: QColor = field(default_factory=lambda: QColor("#14171c"))
-    text_color: QColor = field(default_factory=lambda: QColor("#e5e7eb"))
+    bg_color: QColor = field(default_factory=lambda: QColor("#2b313b"))
+    text_color: QColor = field(default_factory=lambda: QColor("#ebb6e8"))
     accent_color: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
-    font_size: int = 56
-    label_size: int = 12
-    day_time_color: QColor = field(default_factory=lambda: QColor("#94a3b8"))
-    day_time_font_size: int = 20
+    font_size: int = 36
+    label_size: int = 10
+    day_time_color: QColor = field(default_factory=lambda: QColor("#bdfdbb"))
+    day_time_font_size: int = 13
     day_start_hour: int = 6
     day_start_minute: int = 30
     day_end_hour: int = 23
     day_end_minute: int = 0
-    heatmap_color: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
+    heatmap_color: QColor = field(default_factory=lambda: QColor("#8afb71"))
     heatmap_hover_bg_color: QColor = field(default_factory=lambda: QColor("#1f2937"))
     heatmap_hover_text_color: QColor = field(default_factory=lambda: QColor("#f8fafc"))
-    heatmap_hover_cell_color: QColor = field(default_factory=lambda: QColor("#1f2937"))
-    heatmap_cell_size: int = 5
-    heatmap_month_padding: int = 0
+    heatmap_hover_cell_color: QColor = field(default_factory=lambda: QColor("#429e7f"))
+    heatmap_cell_size: int = 4
+    heatmap_month_padding: int = 1
     heatmap_month_label_size: int = 8
     total_today_color: QColor = field(default_factory=lambda: QColor("#94a3b8"))
-    total_today_font_size: int = 20
+    total_today_font_size: int = 10
     goal_left_color: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
-    goal_left_font_size: int = 20
+    goal_left_font_size: int = 10
     goal_pulse_seconds: float = 2.0
     always_on_top: bool = False
 
@@ -1576,8 +1576,8 @@ class CountdownWindow(QMainWindow):
             ui.day_time_color,
         )
         ui.heatmap_color = hex_to_qcolor(
-            settings.value("colors/heatmap", qcolor_to_hex(ui.accent_color)),
-            ui.accent_color,
+            settings.value("colors/heatmap", qcolor_to_hex(ui.heatmap_color)),
+            ui.heatmap_color,
         )
         ui.heatmap_hover_bg_color = hex_to_qcolor(
             settings.value(
@@ -1594,9 +1594,9 @@ class CountdownWindow(QMainWindow):
         ui.heatmap_hover_cell_color = hex_to_qcolor(
             settings.value(
                 "colors/heatmap_hover_cell",
-                qcolor_to_hex(ui.heatmap_hover_bg_color),
+                qcolor_to_hex(ui.heatmap_hover_cell_color),
             ),
-            ui.heatmap_hover_bg_color,
+            ui.heatmap_hover_cell_color,
         )
         ui.heatmap_cell_size = int(
             settings.value("heatmap/cell_size", ui.heatmap_cell_size)
@@ -1655,7 +1655,7 @@ class CountdownWindow(QMainWindow):
 
     def _load_super_goal_seconds(self) -> int:
         settings = QSettings("settings.ini", QSettings.IniFormat)
-        hours = int(settings.value("super_goal/hours", 0))
+        hours = int(settings.value("super_goal/hours", 2))
         minutes = int(settings.value("super_goal/minutes", 0))
         return hours * 3600 + minutes * 60
 
