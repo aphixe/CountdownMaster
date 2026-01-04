@@ -51,6 +51,11 @@ pip install -r requirements.txt
 ```
 
 ## Run
+On Ubuntu, i know on Linux mint vm i had to do the following, or else there is an error
+```sudo apt update
+sudo apt install -y libxcb-cursor0
+```
+
 
 ```bash
 python main.py
