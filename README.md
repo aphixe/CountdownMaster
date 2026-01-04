@@ -56,6 +56,12 @@ On Ubuntu, i know on Linux mint vm i had to do the following, or else there is a
 sudo apt install -y libxcb-cursor0
 ```
 
+Ai tells me this about Arch Manjaro and pacman based Linux
+```sudo pacman -Syu xcb-util-cursor```
+
+Fedora (ai says)
+```sudo dnf install -y xcb-util-cursor```
+
 
 ```bash
 python main.py
