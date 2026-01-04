@@ -917,18 +917,22 @@ class CountdownWindow(QMainWindow):
         always_on_top.setChecked(self._always_on_top)
         reset_time = QAction("Reset Timer", self)
         settings = QAction("Settings", self)
+        quit_action = QAction("Quit", self)
         set_time.triggered.connect(self._open_set_time)
         set_super_goal.triggered.connect(self._open_set_super_goal)
         logs.triggered.connect(self._open_logs)
         always_on_top.toggled.connect(self._toggle_always_on_top)
         reset_time.triggered.connect(self._reset_timer)
         settings.triggered.connect(self._open_settings)
+        quit_action.triggered.connect(self._quit_app)
         menu.addAction(set_time)
         menu.addAction(set_super_goal)
         menu.addAction(logs)
         menu.addAction(always_on_top)
         menu.addAction(reset_time)
         menu.addAction(settings)
+        menu.addSeparator()
+        menu.addAction(quit_action)
         return menu
 
     def _open_set_time(self) -> None:
@@ -976,6 +980,9 @@ class CountdownWindow(QMainWindow):
         self.settings = dialog.updated_settings()
         self._apply_settings()
         self._save_settings()
+
+    def _quit_app(self) -> None:
+        self.close()
 
     def _reset_timer(self) -> None:
         if self.timer.isActive():
@@ -2071,6 +2078,7 @@ def main() -> None:
     setup_logging(log_path)
     sys.excepthook = log_unhandled_exception
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(True)
     app.setStyle("Fusion")
     window = CountdownWindow()
     window.show()
