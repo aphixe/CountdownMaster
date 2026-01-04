@@ -793,7 +793,7 @@ class LogsDialog(QDialog):
 class CountdownWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Goal Timer")
+        self.setWindowTitle("Countdown Master")
         self.setMinimumSize(420, 300)
         self._base_window_size = self.minimumSize()
         self.setAttribute(Qt.WA_TranslucentBackground, True)
