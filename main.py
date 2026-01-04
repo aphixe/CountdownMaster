@@ -1904,6 +1904,17 @@ class CountdownWindow(QMainWindow):
 
             for week in range(weeks):
                 column_widths.append(self._heatmap_cell_size)
+                label_placeholder = QFrame()
+                label_placeholder.setAttribute(
+                    Qt.WA_TransparentForMouseEvents, True
+                )
+                label_placeholder.setFixedSize(
+                    self._heatmap_cell_size, 0
+                )
+                self.month_labels_layout.addWidget(
+                    label_placeholder, 1, col + week
+                )
+                self.month_label_spacers.append(label_placeholder)
                 for row in range(7):
                     day_index = week * 7 + row - leading_blanks
                     cell = QFrame()
@@ -1932,6 +1943,13 @@ class CountdownWindow(QMainWindow):
                 spacer_label.setFixedWidth(self._heatmap_month_padding)
                 self.month_labels_layout.addWidget(spacer_label, 0, col)
                 self.month_label_spacers.append(spacer_label)
+                spacer_anchor = QFrame()
+                spacer_anchor.setAttribute(
+                    Qt.WA_TransparentForMouseEvents, True
+                )
+                spacer_anchor.setFixedSize(self._heatmap_month_padding, 0)
+                self.month_labels_layout.addWidget(spacer_anchor, 1, col)
+                self.month_label_spacers.append(spacer_anchor)
                 column_widths.append(self._heatmap_month_padding)
                 spacer_count += 1
                 col += 1
