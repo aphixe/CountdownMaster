@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QGraphicsBlurEffect,
     QDateEdit,
+    QTimeEdit,
 )
 
 try:
@@ -207,6 +208,51 @@ class SetTimeDialog(QDialog):
         form = QFormLayout()
         form.addRow("Hours", self.hours_spin)
         form.addRow("Minutes", self.minutes_spin)
+
+        buttons = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        buttons.addStretch(1)
+        buttons.addWidget(ok_btn)
+        buttons.addWidget(cancel_btn)
+
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addLayout(buttons)
+        self.setLayout(layout)
+
+
+class AddTimeDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        hours: int = 0,
+        minutes: int = 0,
+        start_time: Optional[QTime] = None,
+        title: str = "Add Time",
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.hours_spin = QSpinBox()
+        self.hours_spin.setRange(0, 23)
+        self.hours_spin.setValue(hours)
+        self.minutes_spin = QSpinBox()
+        self.minutes_spin.setRange(0, 59)
+        self.minutes_spin.setValue(minutes)
+        self.start_time_edit = QTimeEdit()
+        self.start_time_edit.setDisplayFormat("HH:mm")
+        if start_time is None:
+            now = QTime.currentTime()
+            start_time = QTime(now.hour(), now.minute(), 0)
+        self.start_time_edit.setTime(start_time)
+
+        form = QFormLayout()
+        form.addRow("Hours", self.hours_spin)
+        form.addRow("Minutes", self.minutes_spin)
+        form.addRow("Start time", self.start_time_edit)
 
         buttons = QHBoxLayout()
         ok_btn = QPushButton("OK")
@@ -910,6 +956,7 @@ class CountdownWindow(QMainWindow):
     def _build_context_menu(self):
         menu = QMenu(self)
         set_time = QAction("Set Current Goal", self)
+        add_time = QAction("Add Time", self)
         set_super_goal = QAction("Set Daily Super Goal", self)
         logs = QAction("Logs", self)
         always_on_top = QAction("Always On Top", self)
@@ -919,6 +966,7 @@ class CountdownWindow(QMainWindow):
         settings = QAction("Settings", self)
         quit_action = QAction("Quit", self)
         set_time.triggered.connect(self._open_set_time)
+        add_time.triggered.connect(self._open_add_time)
         set_super_goal.triggered.connect(self._open_set_super_goal)
         logs.triggered.connect(self._open_logs)
         always_on_top.toggled.connect(self._toggle_always_on_top)
@@ -926,6 +974,7 @@ class CountdownWindow(QMainWindow):
         settings.triggered.connect(self._open_settings)
         quit_action.triggered.connect(self._quit_app)
         menu.addAction(set_time)
+        menu.addAction(add_time)
         menu.addAction(set_super_goal)
         menu.addAction(logs)
         menu.addAction(always_on_top)
@@ -945,6 +994,42 @@ class CountdownWindow(QMainWindow):
         self.remaining_seconds = hours * 3600 + minutes * 60
         self._update_timer_label()
         self.status_label.setText("Goal time set")
+
+    def _open_add_time(self) -> None:
+        dialog = AddTimeDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        hours = dialog.hours_spin.value()
+        minutes = dialog.minutes_spin.value()
+        duration = hours * 3600 + minutes * 60
+        if duration <= 0:
+            self.status_label.setText("Add time needs hours or minutes")
+            return
+        date_key = self._date_key(QDate.currentDate())
+        start_time = dialog.start_time_edit.time()
+        start_time = QTime(start_time.hour(), start_time.minute(), 0)
+        start_time_str = start_time.toString("HH:mm:ss")
+        end_time_str = start_time.addSecs(duration).toString("HH:mm:ss")
+        goal_seconds = self._goal_seconds_for_date(date_key)
+        self.daily_goals[date_key] = goal_seconds
+        self._append_log_entry(
+            date_key, start_time_str, end_time_str, duration, goal_seconds
+        )
+        self.log_entries.append(
+            {
+                "date": date_key,
+                "start_time": start_time_str,
+                "end_time": end_time_str,
+                "duration_seconds": duration,
+                "goal_seconds": goal_seconds,
+            }
+        )
+        self.daily_totals[date_key] = self.daily_totals.get(date_key, 0) + duration
+        if QDate.currentDate().year() != self._heatmap_year:
+            self._refresh_heatmap()
+        self._update_heatmap_cell(date_key)
+        self._update_total_today_label()
+        self.status_label.setText("Added time to today")
 
     def _open_set_super_goal(self) -> None:
         hours, minutes = self._seconds_to_hm(self.super_goal_seconds)
