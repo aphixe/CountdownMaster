@@ -10,6 +10,8 @@ from PySide6.QtCore import (
     QDate,
     QDateTime,
     QEvent,
+    QPointF,
+    QRectF,
     QSettings,
     QTimer,
     Qt,
@@ -17,9 +19,20 @@ from PySide6.QtCore import (
     QVariantAnimation,
     QEasingCurve,
 )
-from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QPainter, QPen
+from PySide6.QtGui import (
+    QAction,
+    QBrush,
+    QColor,
+    QFont,
+    QFontDatabase,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
@@ -37,6 +50,8 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
+    QScrollArea,
+    QToolTip,
     QVBoxLayout,
     QWidget,
     QColorDialog,
@@ -72,6 +87,10 @@ class UiSettings:
     heatmap_cell_size: int = 4
     heatmap_month_padding: int = 1
     heatmap_month_label_size: int = 8
+    graph_line_color: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
+    graph_dot_color: QColor = field(default_factory=lambda: QColor("#ebb6e8"))
+    graph_fill_color: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
+    graph_grid_color: QColor = field(default_factory=lambda: QColor("#94a3b8"))
     total_today_color: QColor = field(default_factory=lambda: QColor("#94a3b8"))
     total_today_font_size: int = 10
     goal_left_color: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
@@ -356,6 +375,10 @@ class SettingsDialog(QDialog):
         self.heatmap_month_label_spin.setValue(
             ui_settings.heatmap_month_label_size
         )
+        self.graph_line_btn = QPushButton()
+        self.graph_dot_btn = QPushButton()
+        self.graph_fill_btn = QPushButton()
+        self.graph_grid_btn = QPushButton()
         self.total_today_btn = QPushButton()
         self.goal_left_btn = QPushButton()
         self._sync_color_btns()
@@ -375,6 +398,16 @@ class SettingsDialog(QDialog):
         )
         self.heatmap_hover_cell_btn.clicked.connect(
             lambda: self._pick_color("heatmap_hover_cell")
+        )
+        self.graph_line_btn.clicked.connect(
+            lambda: self._pick_color("graph_line")
+        )
+        self.graph_dot_btn.clicked.connect(lambda: self._pick_color("graph_dot"))
+        self.graph_fill_btn.clicked.connect(
+            lambda: self._pick_color("graph_fill")
+        )
+        self.graph_grid_btn.clicked.connect(
+            lambda: self._pick_color("graph_grid")
         )
         self.total_today_btn.clicked.connect(
             lambda: self._pick_color("total_today")
@@ -462,10 +495,24 @@ class SettingsDialog(QDialog):
         heatmap_layout.addStretch(1)
         heatmap_tab.setLayout(heatmap_layout)
 
+        graph_tab = QWidget()
+        graph_layout = QVBoxLayout()
+        graph_colors_group = QGroupBox("Trends Graph")
+        graph_colors_form = QFormLayout()
+        graph_colors_form.addRow("Line", self.graph_line_btn)
+        graph_colors_form.addRow("Dots", self.graph_dot_btn)
+        graph_colors_form.addRow("Fill Gradient", self.graph_fill_btn)
+        graph_colors_form.addRow("Grid/Ticks", self.graph_grid_btn)
+        graph_colors_group.setLayout(graph_colors_form)
+        graph_layout.addWidget(graph_colors_group)
+        graph_layout.addStretch(1)
+        graph_tab.setLayout(graph_layout)
+
         tabs = QTabWidget()
         tabs.addTab(appearance_tab, "Appearance")
         tabs.addTab(day_tab, "Day")
         tabs.addTab(heatmap_tab, "Heatmap")
+        tabs.addTab(graph_tab, "Graph")
 
         buttons = QHBoxLayout()
         ok_btn = QPushButton("Save")
@@ -491,6 +538,10 @@ class SettingsDialog(QDialog):
             (self.heatmap_hover_cell_btn, self._settings.heatmap_hover_cell_color),
             (self.heatmap_hover_bg_btn, self._settings.heatmap_hover_bg_color),
             (self.heatmap_hover_text_btn, self._settings.heatmap_hover_text_color),
+            (self.graph_line_btn, self._settings.graph_line_color),
+            (self.graph_dot_btn, self._settings.graph_dot_color),
+            (self.graph_fill_btn, self._settings.graph_fill_color),
+            (self.graph_grid_btn, self._settings.graph_grid_color),
             (self.total_today_btn, self._settings.total_today_color),
             (self.goal_left_btn, self._settings.goal_left_color),
         ):
@@ -510,6 +561,10 @@ class SettingsDialog(QDialog):
             "heatmap_hover_bg": self._settings.heatmap_hover_bg_color,
             "heatmap_hover_text": self._settings.heatmap_hover_text_color,
             "heatmap_hover_cell": self._settings.heatmap_hover_cell_color,
+            "graph_line": self._settings.graph_line_color,
+            "graph_dot": self._settings.graph_dot_color,
+            "graph_fill": self._settings.graph_fill_color,
+            "graph_grid": self._settings.graph_grid_color,
             "total_today": self._settings.total_today_color,
             "goal_left": self._settings.goal_left_color,
         }[key]
@@ -530,6 +585,14 @@ class SettingsDialog(QDialog):
             self._settings.heatmap_hover_text_color = color
         elif key == "heatmap_hover_cell":
             self._settings.heatmap_hover_cell_color = color
+        elif key == "graph_line":
+            self._settings.graph_line_color = color
+        elif key == "graph_dot":
+            self._settings.graph_dot_color = color
+        elif key == "graph_fill":
+            self._settings.graph_fill_color = color
+        elif key == "graph_grid":
+            self._settings.graph_grid_color = color
         elif key == "total_today":
             self._settings.total_today_color = color
         elif key == "goal_left":
@@ -561,6 +624,10 @@ class SettingsDialog(QDialog):
             heatmap_cell_size=self.heatmap_size_spin.value(),
             heatmap_month_padding=self.heatmap_month_padding_spin.value(),
             heatmap_month_label_size=self.heatmap_month_label_spin.value(),
+            graph_line_color=self._settings.graph_line_color,
+            graph_dot_color=self._settings.graph_dot_color,
+            graph_fill_color=self._settings.graph_fill_color,
+            graph_grid_color=self._settings.graph_grid_color,
             total_today_color=self._settings.total_today_color,
             total_today_font_size=self.total_today_font_spin.value(),
             goal_left_color=self._settings.goal_left_color,
@@ -712,6 +779,408 @@ class GlowFrame(QFrame):
             painter.drawRoundedRect(rect, self._radius, self._radius)
 
 
+class TrendsGraphWidget(QWidget):
+    def __init__(
+        self,
+        daily_totals: dict[str, int],
+        ui_settings: UiSettings,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._daily_totals = daily_totals
+        self._settings = ui_settings
+        self._scale = "week"
+        self._range_days = 7
+        self._points: list[QPointF] = []
+        self._values: list[int] = []
+        self._dates: list[QDate] = []
+        self._hover_index: Optional[int] = None
+        self._point_count = 7
+        self._dot_radius = 4
+        self.setMinimumHeight(240)
+        self.setMinimumWidth(420)
+        self.setMouseTracking(True)
+
+    def set_scale(self, scale: str, range_days: int) -> None:
+        scale = scale.lower().strip()
+        if scale not in ("week", "month", "year"):
+            return
+        self._scale = scale
+        self._range_days = max(1, int(range_days))
+        self._point_count = 12 if self._scale == "year" else self._range_days
+        self.update()
+
+    def point_count(self) -> int:
+        return self._point_count
+
+    def _value_for_date(self, date: QDate) -> int:
+        value = self._daily_totals.get(date.toString("yyyy-MM-dd"), 0)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _build_daily_series(
+        self, days: int
+    ) -> tuple[list[QDate], list[int]]:
+        end = QDate.currentDate()
+        start = end.addDays(-(days - 1))
+        dates: list[QDate] = []
+        values: list[int] = []
+        for offset in range(days):
+            date = start.addDays(offset)
+            dates.append(date)
+            values.append(self._value_for_date(date))
+        return dates, values
+
+    def _build_month_series(self) -> tuple[list[QDate], list[int]]:
+        monthly_totals: dict[tuple[int, int], int] = {}
+        for date_key, value in self._daily_totals.items():
+            date = QDate.fromString(date_key, "yyyy-MM-dd")
+            if not date.isValid():
+                continue
+            try:
+                seconds = int(value)
+            except (TypeError, ValueError):
+                continue
+            key = (date.year(), date.month())
+            monthly_totals[key] = monthly_totals.get(key, 0) + seconds
+        end = QDate.currentDate()
+        start = QDate(end.year(), end.month(), 1).addMonths(-11)
+        dates: list[QDate] = []
+        values: list[int] = []
+        for offset in range(12):
+            date = start.addMonths(offset)
+            dates.append(date)
+            values.append(
+                monthly_totals.get((date.year(), date.month()), 0)
+            )
+        return dates, values
+
+    def _label_indices(self, count: int, show_all: bool) -> range:
+        if show_all or count <= 7:
+            return range(count)
+        step = max(1, int(math.ceil(count / 7)))
+        return range(0, count, step)
+
+    def _format_duration(self, seconds: int) -> str:
+        seconds = max(0, int(seconds))
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+        return f"{hours} hours {minutes} min {secs} sec"
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        if self._scale == "year":
+            dates, values = self._build_month_series()
+        else:
+            dates, values = self._build_daily_series(self._range_days)
+
+        if not dates:
+            return
+
+        max_value = max(values) if values else 0
+        scale_limit_seconds = (
+            (self._settings.day_end_hour * 3600)
+            + (self._settings.day_end_minute * 60)
+        )
+        scale_seconds = max_value
+        if scale_limit_seconds > 0:
+            scale_seconds = min(scale_seconds, scale_limit_seconds)
+        max_hour_label = int(scale_seconds // 3600) if scale_seconds > 0 else 0
+        digit_count = len(str(max(1, max_hour_label)))
+        margin_left = max(24, 12 + (digit_count * 8))
+        margin_right = 24
+        margin_top = 16
+        margin_bottom = 36
+        plot_rect = self.rect().adjusted(
+            margin_left, margin_top, -margin_right, -margin_bottom
+        )
+        if plot_rect.width() <= 0 or plot_rect.height() <= 0:
+            return
+
+        self._points = []
+        self._values = values
+        self._dates = dates
+
+        if max_value <= 0:
+            painter.setPen(self._settings.text_color)
+            painter.drawText(self.rect(), Qt.AlignCenter, "No data for range")
+            return
+        if scale_seconds <= 0:
+            scale_seconds = max_value
+
+        points: list[QPointF] = []
+        count = len(values)
+        step_x = (
+            plot_rect.width() / (count - 1)
+            if count > 1
+            else 0
+        )
+        for idx, value in enumerate(values):
+            clamped_value = min(value, scale_seconds)
+            ratio = clamped_value / scale_seconds if scale_seconds > 0 else 0
+            x = plot_rect.left() + (step_x * idx)
+            y = plot_rect.bottom() - (ratio * plot_rect.height())
+            points.append(QPointF(x, y))
+
+        self._points = points
+
+        max_hours = int(scale_seconds // 3600) if scale_seconds > 0 else 0
+        if max_hours == 0:
+            max_hours = 1
+        grid_color = QColor(self._settings.graph_grid_color)
+        grid_start = QColor(grid_color)
+        grid_start.setAlpha(0)
+        grid_end = QColor(grid_color)
+        grid_end.setAlpha(140)
+        grid_gradient = QLinearGradient(
+            plot_rect.left(), 0, plot_rect.right(), 0
+        )
+        grid_gradient.setColorAt(0, grid_start)
+        grid_gradient.setColorAt(1, grid_end)
+        grid_pen = QPen(QBrush(grid_gradient), 1)
+        painter.setPen(grid_pen)
+        for hour in range(max_hours + 1):
+            ratio = hour / max_hours if max_hours > 0 else 0
+            y = plot_rect.bottom() - (ratio * plot_rect.height())
+            painter.drawLine(plot_rect.left(), y, plot_rect.right(), y)
+
+        tick_color = QColor(self._settings.graph_grid_color)
+        tick_color.setAlpha(210)
+        painter.setPen(tick_color)
+        base_font = QFont(painter.font())
+        tick_font = QFont(base_font)
+        point_size = tick_font.pointSize()
+        if point_size > 0:
+            tick_font.setPointSize(max(7, point_size - 2))
+        else:
+            pixel_size = tick_font.pixelSize()
+            if pixel_size > 0:
+                tick_font.setPixelSize(max(7, pixel_size - 2))
+        painter.setFont(tick_font)
+        metrics = painter.fontMetrics()
+        tick_width = plot_rect.left() - 6
+        for hour in range(max_hours + 1):
+            ratio = hour / max_hours if max_hours > 0 else 0
+            y = plot_rect.bottom() - (ratio * plot_rect.height())
+            label_rect = QRectF(
+                0,
+                y - (metrics.height() / 2),
+                max(0, tick_width),
+                metrics.height(),
+            )
+            painter.drawText(label_rect, Qt.AlignRight | Qt.AlignVCenter, str(hour))
+
+        painter.setFont(base_font)
+        axis_color = QColor(self._settings.graph_grid_color)
+        axis_color.setAlpha(180)
+        painter.setPen(QPen(axis_color, 1.2))
+        painter.drawLine(plot_rect.bottomLeft(), plot_rect.bottomRight())
+
+        if len(points) > 1:
+            path = QPainterPath(points[0])
+            for idx in range(1, len(points)):
+                path.lineTo(points[idx])
+
+            fill_path = QPainterPath(path)
+            fill_path.lineTo(points[-1].x(), plot_rect.bottom())
+            fill_path.lineTo(points[0].x(), plot_rect.bottom())
+            fill_path.closeSubpath()
+
+            gradient = QLinearGradient(
+                0, plot_rect.top(), 0, plot_rect.bottom()
+            )
+            fill_top = QColor(self._settings.graph_fill_color)
+            fill_top.setAlpha(160)
+            fill_bottom = QColor(self._settings.graph_fill_color)
+            fill_bottom.setAlpha(0)
+            gradient.setColorAt(0, fill_top)
+            gradient.setColorAt(1, fill_bottom)
+            painter.fillPath(fill_path, gradient)
+
+            pen = QPen(self._settings.graph_line_color, 2.5)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPath(path)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._settings.graph_dot_color)
+        dot_radius = self._dot_radius
+        for point in points:
+            painter.drawEllipse(point, dot_radius, dot_radius)
+
+        if self._scale == "year":
+            labels = [date.toString("MMM") for date in dates]
+            indices = self._label_indices(len(labels), True)
+        elif self._scale == "week":
+            labels = [date.toString("ddd") for date in dates]
+            indices = self._label_indices(len(labels), True)
+        else:
+            labels = [date.toString("d") for date in dates]
+            indices = self._label_indices(len(labels), False)
+
+        label_color = QColor(self._settings.text_color)
+        label_color.setAlpha(200)
+        painter.setPen(label_color)
+        metrics = painter.fontMetrics()
+        label_y = self.rect().bottom() - 12
+        for idx in indices:
+            if idx >= len(points):
+                continue
+            text = labels[idx]
+            text_width = metrics.horizontalAdvance(text)
+            x = points[idx].x() - (text_width / 2)
+            painter.drawText(int(x), int(label_y), text)
+
+    def mouseMoveEvent(self, event) -> None:
+        if not self._points:
+            QToolTip.hideText()
+            self._hover_index = None
+            return
+        closest_index = None
+        closest_dist = None
+        for idx, point in enumerate(self._points):
+            dist = (point.x() - event.position().x()) ** 2 + (
+                point.y() - event.position().y()
+            ) ** 2
+            if closest_dist is None or dist < closest_dist:
+                closest_dist = dist
+                closest_index = idx
+        hit_radius = (self._dot_radius + 4) ** 2
+        if closest_index is None or closest_dist is None or closest_dist > hit_radius:
+            if self._hover_index is not None:
+                QToolTip.hideText()
+            self._hover_index = None
+            return
+        if self._hover_index == closest_index:
+            return
+        self._hover_index = closest_index
+        seconds = self._values[closest_index] if closest_index < len(self._values) else 0
+        QToolTip.showText(
+            event.globalPos(),
+            self._format_duration(seconds),
+            self,
+        )
+
+    def leaveEvent(self, event) -> None:
+        self._hover_index = None
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+
+class GraphDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        daily_totals: dict[str, int],
+        ui_settings: UiSettings,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Trends Graph")
+        self.setModal(True)
+        self._settings = ui_settings
+
+        self.graph = TrendsGraphWidget(daily_totals, ui_settings)
+
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidget(self.graph)
+        self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setMinimumHeight(self.graph.minimumHeight())
+        self.scroll_area.setStyleSheet(
+            "QScrollBar:horizontal {"
+            "background: #111827; height: 12px; margin: 0 12px;"
+            "border-radius: 6px;"
+            "}"
+            "QScrollBar::handle:horizontal {"
+            "background: #4b5563; min-width: 30px; border-radius: 6px;"
+            "}"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {"
+            "background: none; width: 0px;"
+            "}"
+            "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {"
+            "background: #0b0f14;"
+            "}"
+        )
+
+        self.scale_combo = QComboBox()
+        self.scale_combo.addItems(["Week", "Month", "Year"])
+        self.range_combo = QComboBox()
+        self.range_combo.addItems(["7 days", "30 days"])
+
+        self.scale_combo.currentTextChanged.connect(self._sync_graph)
+        self.range_combo.currentTextChanged.connect(self._sync_graph)
+
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Scale"))
+        controls.addWidget(self.scale_combo)
+        controls.addSpacing(12)
+        controls.addWidget(QLabel("Range"))
+        controls.addWidget(self.range_combo)
+        controls.addStretch(1)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        footer.addWidget(close_btn)
+
+        layout = QVBoxLayout()
+        layout.addLayout(controls)
+        layout.addWidget(self.scroll_area)
+        layout.addLayout(footer)
+        self.setLayout(layout)
+
+        self._sync_graph()
+
+    def _sync_graph(self) -> None:
+        scale = self.scale_combo.currentText().lower()
+        range_text = self.range_combo.currentText()
+        range_days = 7
+        if range_text:
+            try:
+                range_days = int(range_text.split()[0])
+            except (TypeError, ValueError):
+                range_days = 7
+        if scale == "year":
+            self.range_combo.setEnabled(False)
+            range_days = 365
+        else:
+            self.range_combo.setEnabled(True)
+        self.graph.set_scale(scale, range_days)
+        self._update_graph_width()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        QTimer.singleShot(0, self._update_graph_width)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_graph_width()
+
+    def _update_graph_width(self) -> None:
+        viewport_width = self.scroll_area.viewport().width()
+        viewport_height = self.scroll_area.viewport().height()
+        if viewport_width <= 0 or viewport_height <= 0:
+            return
+        point_count = max(1, self.graph.point_count())
+        base_width = max(1, viewport_width)
+        target_width = (
+            base_width
+            if point_count <= 7
+            else int(base_width * (point_count / 7))
+        )
+        self.graph.setFixedWidth(target_width)
+        self.graph.setFixedHeight(viewport_height)
+
+
 class LogsDialog(QDialog):
     def __init__(
         self,
@@ -719,6 +1188,8 @@ class LogsDialog(QDialog):
         entries: list[dict[str, object]],
         daily_goals: dict[str, int],
         fallback_goal_seconds: int,
+        daily_totals: dict[str, int],
+        ui_settings: UiSettings,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Daily Logs")
@@ -726,6 +1197,8 @@ class LogsDialog(QDialog):
         self._entries = entries
         self._daily_goals = daily_goals
         self._fallback_goal_seconds = fallback_goal_seconds
+        self._daily_totals = daily_totals
+        self._settings = ui_settings
 
         self.date_edit = QDateEdit(QDate.currentDate())
         self.date_edit.setCalendarPopup(True)
@@ -788,7 +1261,6 @@ class LogsDialog(QDialog):
                 item = QTableWidgetItem(str(value))
                 item.setFlags(Qt.ItemIsEnabled)
                 self.table.setItem(row_idx, col, item)
-
 
 class CountdownWindow(QMainWindow):
     def __init__(self) -> None:
@@ -959,6 +1431,7 @@ class CountdownWindow(QMainWindow):
         add_time = QAction("Add Time", self)
         set_super_goal = QAction("Set Daily Super Goal", self)
         logs = QAction("Logs", self)
+        trends_graph = QAction("Trends Graph", self)
         always_on_top = QAction("Always On Top", self)
         always_on_top.setCheckable(True)
         always_on_top.setChecked(self._always_on_top)
@@ -969,6 +1442,7 @@ class CountdownWindow(QMainWindow):
         add_time.triggered.connect(self._open_add_time)
         set_super_goal.triggered.connect(self._open_set_super_goal)
         logs.triggered.connect(self._open_logs)
+        trends_graph.triggered.connect(self._open_trends_graph)
         always_on_top.toggled.connect(self._toggle_always_on_top)
         reset_time.triggered.connect(self._reset_timer)
         settings.triggered.connect(self._open_settings)
@@ -977,6 +1451,7 @@ class CountdownWindow(QMainWindow):
         menu.addAction(add_time)
         menu.addAction(set_super_goal)
         menu.addAction(logs)
+        menu.addAction(trends_graph)
         menu.addAction(always_on_top)
         menu.addAction(reset_time)
         menu.addAction(settings)
@@ -1053,7 +1528,13 @@ class CountdownWindow(QMainWindow):
             self.log_entries,
             self.daily_goals,
             self.super_goal_seconds,
+            self.daily_totals,
+            self.settings,
         )
+        dialog.exec()
+
+    def _open_trends_graph(self) -> None:
+        dialog = GraphDialog(self, self.daily_totals, self.settings)
         dialog.exec()
 
     def _open_settings(self) -> None:
@@ -1598,6 +2079,28 @@ class CountdownWindow(QMainWindow):
             ),
             ui.heatmap_hover_cell_color,
         )
+        ui.graph_line_color = hex_to_qcolor(
+            settings.value(
+                "colors/graph_line", qcolor_to_hex(ui.graph_line_color)
+            ),
+            ui.graph_line_color,
+        )
+        ui.graph_dot_color = hex_to_qcolor(
+            settings.value("colors/graph_dot", qcolor_to_hex(ui.graph_dot_color)),
+            ui.graph_dot_color,
+        )
+        ui.graph_fill_color = hex_to_qcolor(
+            settings.value(
+                "colors/graph_fill", qcolor_to_hex(ui.graph_fill_color)
+            ),
+            ui.graph_fill_color,
+        )
+        ui.graph_grid_color = hex_to_qcolor(
+            settings.value(
+                "colors/graph_grid", qcolor_to_hex(ui.graph_grid_color)
+            ),
+            ui.graph_grid_color,
+        )
         ui.heatmap_cell_size = int(
             settings.value("heatmap/cell_size", ui.heatmap_cell_size)
         )
@@ -1843,6 +2346,18 @@ class CountdownWindow(QMainWindow):
         settings.setValue(
             "colors/heatmap_hover_cell",
             qcolor_to_hex(self.settings.heatmap_hover_cell_color),
+        )
+        settings.setValue(
+            "colors/graph_line", qcolor_to_hex(self.settings.graph_line_color)
+        )
+        settings.setValue(
+            "colors/graph_dot", qcolor_to_hex(self.settings.graph_dot_color)
+        )
+        settings.setValue(
+            "colors/graph_fill", qcolor_to_hex(self.settings.graph_fill_color)
+        )
+        settings.setValue(
+            "colors/graph_grid", qcolor_to_hex(self.settings.graph_grid_color)
         )
         settings.setValue("heatmap/cell_size", self.settings.heatmap_cell_size)
         settings.setValue(
