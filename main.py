@@ -217,11 +217,25 @@ def apply_windows_acrylic(hwnd: int, color: QColor, opacity: float) -> None:
 
 class SetTimeDialog(QDialog):
     def __init__(
-        self, parent: QWidget, hours: int, minutes: int, title: str = "Set Time"
+        self,
+        parent: QWidget,
+        hours: int,
+        minutes: int,
+        *,
+        seconds: int = 0,
+        title: str = "Set Time",
+        super_goal_left_seconds: Optional[int] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
+        self._extra_seconds = max(0, min(59, int(seconds)))
+        self._setting_time = False
+        self._super_goal_left_seconds = (
+            max(0, int(super_goal_left_seconds))
+            if super_goal_left_seconds is not None
+            else None
+        )
         self.hours_spin = QSpinBox()
         self.hours_spin.setRange(0, 23)
         self.hours_spin.setValue(hours)
@@ -234,6 +248,16 @@ class SetTimeDialog(QDialog):
         form.addRow("Minutes", self.minutes_spin)
 
         buttons = QHBoxLayout()
+        self.add_super_goal_btn = None
+        if self._super_goal_left_seconds is not None:
+            self.add_super_goal_btn = QPushButton("Add Super Goal Left")
+            self.add_super_goal_btn.clicked.connect(self._add_super_goal_left)
+            if self._super_goal_left_seconds <= 0:
+                self.add_super_goal_btn.setEnabled(False)
+                self.add_super_goal_btn.setToolTip(
+                    "No super goal time left to add."
+                )
+            buttons.addWidget(self.add_super_goal_btn)
         ok_btn = QPushButton("OK")
         cancel_btn = QPushButton("Cancel")
         ok_btn.clicked.connect(self.accept)
@@ -242,10 +266,48 @@ class SetTimeDialog(QDialog):
         buttons.addWidget(ok_btn)
         buttons.addWidget(cancel_btn)
 
+        self.hours_spin.valueChanged.connect(self._clear_extra_seconds)
+        self.minutes_spin.valueChanged.connect(self._clear_extra_seconds)
+
         layout = QVBoxLayout()
         layout.addLayout(form)
         layout.addLayout(buttons)
         self.setLayout(layout)
+
+    def total_seconds(self) -> int:
+        return (
+            self.hours_spin.value() * 3600
+            + self.minutes_spin.value() * 60
+            + self._extra_seconds
+        )
+
+    def _clear_extra_seconds(self, _value: int) -> None:
+        if self._setting_time:
+            return
+        self._extra_seconds = 0
+
+    def _set_time_from_seconds(self, total_seconds: int) -> None:
+        total_seconds = max(0, int(total_seconds))
+        hours_max = self.hours_spin.maximum()
+        minutes_max = self.minutes_spin.maximum()
+        max_total = hours_max * 3600 + minutes_max * 60 + 59
+        total_seconds = min(total_seconds, max_total)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        self._setting_time = True
+        try:
+            self.hours_spin.setValue(hours)
+            self.minutes_spin.setValue(minutes)
+            self._extra_seconds = total_seconds % 60
+        finally:
+            self._setting_time = False
+
+    def _add_super_goal_left(self) -> None:
+        if not self._super_goal_left_seconds:
+            return
+        self._set_time_from_seconds(
+            self.total_seconds() + self._super_goal_left_seconds
+        )
 
 
 class AddTimeDialog(QDialog):
@@ -1605,12 +1667,18 @@ class CountdownWindow(QMainWindow):
 
     def _open_set_time(self) -> None:
         hours, minutes = self._seconds_to_hm(self.remaining_seconds)
-        dialog = SetTimeDialog(self, hours, minutes)
+        seconds = self.remaining_seconds % 60
+        super_goal_left_seconds = self._super_goal_left_seconds()
+        dialog = SetTimeDialog(
+            self,
+            hours,
+            minutes,
+            seconds=seconds,
+            super_goal_left_seconds=super_goal_left_seconds,
+        )
         if dialog.exec() != QDialog.Accepted:
             return
-        hours = dialog.hours_spin.value()
-        minutes = dialog.minutes_spin.value()
-        self.remaining_seconds = hours * 3600 + minutes * 60
+        self.remaining_seconds = dialog.total_seconds()
         self._update_timer_label()
         self.status_label.setText("Goal time set")
 
@@ -2009,6 +2077,14 @@ class CountdownWindow(QMainWindow):
             f"{remaining % 60:02d}"
         )
         self.super_goal_bar.set_progress(total_seconds / goal_seconds)
+
+    def _super_goal_left_seconds(self) -> int:
+        date_key = self._date_key(QDate.currentDate())
+        goal_seconds = self._goal_seconds_for_date(date_key)
+        if goal_seconds <= 0:
+            return 0
+        total_seconds = self._total_seconds_for_day(date_key)
+        return max(0, goal_seconds - total_seconds)
 
     def _update_year_total_label(self) -> None:
         current_year = QDate.currentDate().year()
