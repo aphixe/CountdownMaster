@@ -95,6 +95,11 @@ class UiSettings:
     total_today_font_size: int = 10
     goal_left_color: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
     goal_left_font_size: int = 10
+    super_goal_bar_start: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
+    super_goal_bar_end: QColor = field(default_factory=lambda: QColor("#8afb71"))
+    super_goal_bar_bg: QColor = field(default_factory=lambda: QColor("#1f2937"))
+    super_goal_bar_width: int = 120
+    super_goal_bar_height: int = 8
     goal_pulse_seconds: float = 2.0
     always_on_top: bool = False
 
@@ -347,6 +352,14 @@ class SettingsDialog(QDialog):
         self.goal_left_font_spin.setRange(10, 48)
         self.goal_left_font_spin.setValue(ui_settings.goal_left_font_size)
 
+        self.super_goal_bar_width_spin = QSpinBox()
+        self.super_goal_bar_width_spin.setRange(40, 400)
+        self.super_goal_bar_width_spin.setValue(ui_settings.super_goal_bar_width)
+
+        self.super_goal_bar_height_spin = QSpinBox()
+        self.super_goal_bar_height_spin.setRange(4, 40)
+        self.super_goal_bar_height_spin.setValue(ui_settings.super_goal_bar_height)
+
         self.goal_pulse_spin = QDoubleSpinBox()
         self.goal_pulse_spin.setRange(0.2, 10.0)
         self.goal_pulse_spin.setSingleStep(0.1)
@@ -381,6 +394,9 @@ class SettingsDialog(QDialog):
         self.graph_grid_btn = QPushButton()
         self.total_today_btn = QPushButton()
         self.goal_left_btn = QPushButton()
+        self.super_goal_bar_start_btn = QPushButton()
+        self.super_goal_bar_end_btn = QPushButton()
+        self.super_goal_bar_bg_btn = QPushButton()
         self._sync_color_btns()
 
         self.bg_btn.clicked.connect(lambda: self._pick_color("bg"))
@@ -413,6 +429,15 @@ class SettingsDialog(QDialog):
             lambda: self._pick_color("total_today")
         )
         self.goal_left_btn.clicked.connect(lambda: self._pick_color("goal_left"))
+        self.super_goal_bar_start_btn.clicked.connect(
+            lambda: self._pick_color("super_goal_bar_start")
+        )
+        self.super_goal_bar_end_btn.clicked.connect(
+            lambda: self._pick_color("super_goal_bar_end")
+        )
+        self.super_goal_bar_bg_btn.clicked.connect(
+            lambda: self._pick_color("super_goal_bar_bg")
+        )
 
         appearance_tab = QWidget()
         appearance_layout = QVBoxLayout()
@@ -452,9 +477,18 @@ class SettingsDialog(QDialog):
         totals_form = QFormLayout()
         totals_form.addRow("Total Today Font Size", self.total_today_font_spin)
         totals_form.addRow("Total Today Color", self.total_today_btn)
-        totals_form.addRow("Goal Left Font Size", self.goal_left_font_spin)
-        totals_form.addRow("Goal Left Color", self.goal_left_btn)
+        totals_form.addRow("Super Goal Left Font Size", self.goal_left_font_spin)
+        totals_form.addRow("Super Goal Left Color", self.goal_left_btn)
         totals_group.setLayout(totals_form)
+
+        super_goal_bar_group = QGroupBox("Super Goal Bar")
+        super_goal_bar_form = QFormLayout()
+        super_goal_bar_form.addRow("Width", self.super_goal_bar_width_spin)
+        super_goal_bar_form.addRow("Height", self.super_goal_bar_height_spin)
+        super_goal_bar_form.addRow("Gradient Start", self.super_goal_bar_start_btn)
+        super_goal_bar_form.addRow("Gradient End", self.super_goal_bar_end_btn)
+        super_goal_bar_form.addRow("Background", self.super_goal_bar_bg_btn)
+        super_goal_bar_group.setLayout(super_goal_bar_form)
 
         pulse_group = QGroupBox("Goal Pulse")
         pulse_form = QFormLayout()
@@ -463,6 +497,7 @@ class SettingsDialog(QDialog):
 
         day_layout.addWidget(day_time_group)
         day_layout.addWidget(totals_group)
+        day_layout.addWidget(super_goal_bar_group)
         day_layout.addWidget(pulse_group)
         day_layout.addStretch(1)
         day_tab.setLayout(day_layout)
@@ -544,6 +579,9 @@ class SettingsDialog(QDialog):
             (self.graph_grid_btn, self._settings.graph_grid_color),
             (self.total_today_btn, self._settings.total_today_color),
             (self.goal_left_btn, self._settings.goal_left_color),
+            (self.super_goal_bar_start_btn, self._settings.super_goal_bar_start),
+            (self.super_goal_bar_end_btn, self._settings.super_goal_bar_end),
+            (self.super_goal_bar_bg_btn, self._settings.super_goal_bar_bg),
         ):
             btn.setText(color.name())
             btn.setStyleSheet(
@@ -567,6 +605,9 @@ class SettingsDialog(QDialog):
             "graph_grid": self._settings.graph_grid_color,
             "total_today": self._settings.total_today_color,
             "goal_left": self._settings.goal_left_color,
+            "super_goal_bar_start": self._settings.super_goal_bar_start,
+            "super_goal_bar_end": self._settings.super_goal_bar_end,
+            "super_goal_bar_bg": self._settings.super_goal_bar_bg,
         }[key]
         color = QColorDialog.getColor(current, self)
         if not color.isValid():
@@ -597,6 +638,12 @@ class SettingsDialog(QDialog):
             self._settings.total_today_color = color
         elif key == "goal_left":
             self._settings.goal_left_color = color
+        elif key == "super_goal_bar_start":
+            self._settings.super_goal_bar_start = color
+        elif key == "super_goal_bar_end":
+            self._settings.super_goal_bar_end = color
+        elif key == "super_goal_bar_bg":
+            self._settings.super_goal_bar_bg = color
         else:
             self._settings.accent_color = color
         self._sync_color_btns()
@@ -632,6 +679,11 @@ class SettingsDialog(QDialog):
             total_today_font_size=self.total_today_font_spin.value(),
             goal_left_color=self._settings.goal_left_color,
             goal_left_font_size=self.goal_left_font_spin.value(),
+            super_goal_bar_start=self._settings.super_goal_bar_start,
+            super_goal_bar_end=self._settings.super_goal_bar_end,
+            super_goal_bar_bg=self._settings.super_goal_bar_bg,
+            super_goal_bar_width=self.super_goal_bar_width_spin.value(),
+            super_goal_bar_height=self.super_goal_bar_height_spin.value(),
             goal_pulse_seconds=self.goal_pulse_spin.value(),
             always_on_top=self._settings.always_on_top,
         )
@@ -738,6 +790,65 @@ class AnimatedToggleButton(QPushButton):
     def leaveEvent(self, event) -> None:
         self._animate_press(0.0)
         super().leaveEvent(event)
+
+
+class SuperGoalProgressBar(QWidget):
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        start_color: QColor,
+        end_color: QColor,
+        bg_color: QColor,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._progress = 0.0
+        self._start_color = start_color
+        self._end_color = end_color
+        self._bg_color = bg_color
+        self.setFixedSize(max(1, width), max(1, height))
+
+    def set_colors(
+        self, start_color: QColor, end_color: QColor, bg_color: QColor
+    ) -> None:
+        self._start_color = start_color
+        self._end_color = end_color
+        self._bg_color = bg_color
+        self.update()
+
+    def set_bar_size(self, width: int, height: int) -> None:
+        self.setFixedSize(max(1, width), max(1, height))
+        self.update()
+
+    def set_progress(self, progress: float) -> None:
+        clamped = max(0.0, min(1.0, float(progress)))
+        if math.isclose(self._progress, clamped):
+            return
+        self._progress = clamped
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        rect = QRectF(self.rect())
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        radius = min(rect.height() / 2.0, 6.0)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._bg_color)
+        painter.drawRoundedRect(rect, radius, radius)
+        if self._progress <= 0:
+            return
+        painter.save()
+        fill_width = rect.width() * self._progress
+        painter.setClipRect(QRectF(rect.x(), rect.y(), fill_width, rect.height()))
+        gradient = QLinearGradient(rect.topLeft(), rect.topRight())
+        gradient.setColorAt(0.0, self._start_color)
+        gradient.setColorAt(1.0, self._end_color)
+        painter.setBrush(QBrush(gradient))
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.restore()
 
 
 class GlowFrame(QFrame):
@@ -1366,9 +1477,17 @@ class CountdownWindow(QMainWindow):
         self.total_today_label.setAlignment(Qt.AlignCenter)
         self.total_today_label.setObjectName("totalTodayLabel")
 
-        self.goal_left_label = QLabel("Goal left: please set goal")
+        self.goal_left_label = QLabel("Super goal left: please set goal")
         self.goal_left_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.goal_left_label.setObjectName("goalLeftLabel")
+
+        self.super_goal_bar = SuperGoalProgressBar(
+            self.settings.super_goal_bar_width,
+            self.settings.super_goal_bar_height,
+            self.settings.super_goal_bar_start,
+            self.settings.super_goal_bar_end,
+            self.settings.super_goal_bar_bg,
+        )
 
         self.year_total_label = QLabel("Year total: 0d 00:00:00")
         self.year_total_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -1377,6 +1496,14 @@ class CountdownWindow(QMainWindow):
         self.status_label = QLabel("Right click to set goal time")
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setObjectName("statusLabel")
+
+        self.longest_streak_label = QLabel("Longest streak: 0 days")
+        self.longest_streak_label.setAlignment(Qt.AlignCenter)
+        self.longest_streak_label.setObjectName("longestStreakLabel")
+
+        self.current_streak_label = QLabel("Current streak: 0 days")
+        self.current_streak_label.setAlignment(Qt.AlignCenter)
+        self.current_streak_label.setObjectName("currentStreakLabel")
 
         self.heatmap_widget = self._build_heatmap()
 
@@ -1398,12 +1525,29 @@ class CountdownWindow(QMainWindow):
         goal_row_layout = QHBoxLayout()
         goal_row_layout.setContentsMargins(0, 0, 0, 0)
         goal_row_layout.setSpacing(12)
-        goal_row_layout.addWidget(self.goal_left_label)
+        goal_left_group = QWidget()
+        goal_left_layout = QHBoxLayout()
+        goal_left_layout.setContentsMargins(0, 0, 0, 0)
+        goal_left_layout.setSpacing(8)
+        goal_left_layout.addWidget(self.goal_left_label)
+        goal_left_layout.addWidget(self.super_goal_bar)
+        goal_left_group.setLayout(goal_left_layout)
+        goal_row_layout.addWidget(goal_left_group)
         goal_row_layout.addStretch(1)
         goal_row_layout.addWidget(self.year_total_label)
         goal_row.setLayout(goal_row_layout)
         content_layout.addWidget(goal_row)
         content_layout.addWidget(self.heatmap_widget, alignment=Qt.AlignCenter)
+        streak_row = QWidget()
+        streak_layout = QHBoxLayout()
+        streak_layout.setContentsMargins(0, 0, 0, 0)
+        streak_layout.setSpacing(16)
+        streak_layout.addStretch(1)
+        streak_layout.addWidget(self.longest_streak_label)
+        streak_layout.addWidget(self.current_streak_label)
+        streak_layout.addStretch(1)
+        streak_row.setLayout(streak_layout)
+        content_layout.addWidget(streak_row)
         content_layout.addWidget(self.status_label)
         content_layout.addLayout(button_row)
         content_layout.addStretch(1)
@@ -1600,6 +1744,17 @@ class CountdownWindow(QMainWindow):
         self.year_total_label.setStyleSheet(
             f"color: {qcolor_to_hex(self.settings.total_today_color)};"
         )
+        self.super_goal_bar.set_colors(
+            self.settings.super_goal_bar_start,
+            self.settings.super_goal_bar_end,
+            self.settings.super_goal_bar_bg,
+        )
+        self.longest_streak_label.setStyleSheet(
+            f"color: {qcolor_to_hex(self.settings.total_today_color)};"
+        )
+        self.current_streak_label.setStyleSheet(
+            f"color: {qcolor_to_hex(self.settings.total_today_color)};"
+        )
         self._goal_pulse_anim.setDuration(
             max(200, int(self.settings.goal_pulse_seconds * 1000))
         )
@@ -1668,6 +1823,15 @@ class CountdownWindow(QMainWindow):
         )
         self.year_total_label.setFont(
             QFont(self._font_family, goal_left_size)
+        )
+        bar_width = max(20, int(self.settings.super_goal_bar_width * scale))
+        bar_height = max(4, int(self.settings.super_goal_bar_height * scale))
+        self.super_goal_bar.set_bar_size(bar_width, bar_height)
+        self.longest_streak_label.setFont(
+            QFont(self._font_family, label_size)
+        )
+        self.current_streak_label.setFont(
+            QFont(self._font_family, label_size)
         )
         self.toggle_btn.set_scale(scale)
         self._heatmap_month_label_size = max(
@@ -1828,20 +1992,23 @@ class CountdownWindow(QMainWindow):
         )
         self._update_goal_left_label()
         self._update_year_total_label()
+        self._update_streak_labels()
 
     def _update_goal_left_label(self) -> None:
         date_key = self._date_key(QDate.currentDate())
         goal_seconds = self._goal_seconds_for_date(date_key)
         if goal_seconds <= 0:
-            self.goal_left_label.setText("Goal left: please set goal")
+            self.goal_left_label.setText("Super goal left: please set goal")
+            self.super_goal_bar.set_progress(0.0)
             return
         total_seconds = self._total_seconds_for_day(date_key)
         remaining = max(0, goal_seconds - total_seconds)
         self.goal_left_label.setText(
-            f"Goal left: {remaining // 3600:02d}:"
+            f"Super goal left: {remaining // 3600:02d}:"
             f"{(remaining % 3600) // 60:02d}:"
             f"{remaining % 60:02d}"
         )
+        self.super_goal_bar.set_progress(total_seconds / goal_seconds)
 
     def _update_year_total_label(self) -> None:
         current_year = QDate.currentDate().year()
@@ -1863,6 +2030,17 @@ class CountdownWindow(QMainWindow):
         seconds = remainder % 60
         self.year_total_label.setText(
             f"Year total: {days}d {hours:02d}:{minutes:02d}:{seconds:02d}"
+        )
+
+    def _update_streak_labels(self) -> None:
+        longest, current = self._calculate_streaks()
+        longest_label = "day" if longest == 1 else "days"
+        current_label = "day" if current == 1 else "days"
+        self.longest_streak_label.setText(
+            f"Longest streak: {longest} {longest_label}"
+        )
+        self.current_streak_label.setText(
+            f"Current streak: {current} {current_label}"
         )
 
     def _toggle_always_on_top(self, enabled: bool, save: bool = True) -> None:
@@ -2021,6 +2199,57 @@ class CountdownWindow(QMainWindow):
             total += self._active_session_seconds
         return total
 
+    def _goal_met_on_date(self, date_key: str) -> bool:
+        goal_seconds = self.daily_goals.get(date_key, 0)
+        if goal_seconds <= 0:
+            return False
+        return self._total_seconds_for_day(date_key) >= goal_seconds
+
+    def _calculate_streaks(self) -> tuple[int, int]:
+        goal_dates: list[QDate] = []
+        for date_key, goal_seconds in self.daily_goals.items():
+            if goal_seconds <= 0:
+                continue
+            date = QDate.fromString(date_key, "yyyy-MM-dd")
+            if date.isValid():
+                goal_dates.append(date)
+        goal_dates.sort(key=lambda date: date.toJulianDay())
+
+        longest = 0
+        running = 0
+        prev_date = None
+        for date in goal_dates:
+            met = self._goal_met_on_date(self._date_key(date))
+            if met:
+                if prev_date is not None and prev_date.addDays(1) == date:
+                    running += 1
+                else:
+                    running = 1
+                longest = max(longest, running)
+            else:
+                running = 0
+            prev_date = date
+
+        today = QDate.currentDate()
+        latest_met = None
+        for date in reversed(goal_dates):
+            if self._goal_met_on_date(self._date_key(date)):
+                latest_met = date
+                break
+
+        if latest_met is None:
+            return longest, 0
+        if latest_met < today.addDays(-1):
+            return longest, 0
+
+        current_streak = 0
+        date = latest_met
+        while self._goal_met_on_date(self._date_key(date)):
+            current_streak += 1
+            date = date.addDays(-1)
+
+        return longest, current_streak
+
     def _record_super_goal_progress(self, seconds: int) -> None:
         if seconds <= 0:
             return
@@ -2126,6 +2355,27 @@ class CountdownWindow(QMainWindow):
             settings.value("colors/goal_left", qcolor_to_hex(ui.goal_left_color)),
             ui.goal_left_color,
         )
+        ui.super_goal_bar_start = hex_to_qcolor(
+            settings.value(
+                "colors/super_goal_bar_start",
+                qcolor_to_hex(ui.super_goal_bar_start),
+            ),
+            ui.super_goal_bar_start,
+        )
+        ui.super_goal_bar_end = hex_to_qcolor(
+            settings.value(
+                "colors/super_goal_bar_end",
+                qcolor_to_hex(ui.super_goal_bar_end),
+            ),
+            ui.super_goal_bar_end,
+        )
+        ui.super_goal_bar_bg = hex_to_qcolor(
+            settings.value(
+                "colors/super_goal_bar_bg",
+                qcolor_to_hex(ui.super_goal_bar_bg),
+            ),
+            ui.super_goal_bar_bg,
+        )
         ui.font_size = int(settings.value("fonts/timer", ui.font_size))
         ui.label_size = int(settings.value("fonts/label", ui.label_size))
         ui.day_time_font_size = int(
@@ -2137,6 +2387,14 @@ class CountdownWindow(QMainWindow):
         ui.goal_left_font_size = int(
             settings.value("fonts/goal_left", ui.goal_left_font_size)
         )
+        ui.super_goal_bar_width = int(
+            settings.value("super_goal_bar/width", ui.super_goal_bar_width)
+        )
+        ui.super_goal_bar_height = int(
+            settings.value("super_goal_bar/height", ui.super_goal_bar_height)
+        )
+        ui.super_goal_bar_width = max(40, ui.super_goal_bar_width)
+        ui.super_goal_bar_height = max(4, ui.super_goal_bar_height)
         ui.goal_pulse_seconds = float(
             settings.value("goal_pulse/seconds", ui.goal_pulse_seconds)
         )
@@ -2374,11 +2632,25 @@ class CountdownWindow(QMainWindow):
             "colors/goal_left",
             qcolor_to_hex(self.settings.goal_left_color),
         )
+        settings.setValue(
+            "colors/super_goal_bar_start",
+            qcolor_to_hex(self.settings.super_goal_bar_start),
+        )
+        settings.setValue(
+            "colors/super_goal_bar_end",
+            qcolor_to_hex(self.settings.super_goal_bar_end),
+        )
+        settings.setValue(
+            "colors/super_goal_bar_bg",
+            qcolor_to_hex(self.settings.super_goal_bar_bg),
+        )
         settings.setValue("fonts/timer", self.settings.font_size)
         settings.setValue("fonts/label", self.settings.label_size)
         settings.setValue("fonts/day_time", self.settings.day_time_font_size)
         settings.setValue("fonts/total_today", self.settings.total_today_font_size)
         settings.setValue("fonts/goal_left", self.settings.goal_left_font_size)
+        settings.setValue("super_goal_bar/width", self.settings.super_goal_bar_width)
+        settings.setValue("super_goal_bar/height", self.settings.super_goal_bar_height)
         settings.setValue("goal_pulse/seconds", self.settings.goal_pulse_seconds)
         settings.setValue("window/always_on_top", int(self.settings.always_on_top))
         settings.setValue("day_time/start_hour", self.settings.day_start_hour)
