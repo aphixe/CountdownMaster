@@ -4,3 +4,11 @@ debug.log
 Countdown Master.lnk
 .DS_Store
 settings.sync-conflict-20260107-083044-N2XQTBX.ini
+CountdownMaster.app/Contents/Info.plist
+CountdownMaster.app/Contents/PkgInfo
+CountdownMaster.app/Contents/MacOS/applet
+CountdownMaster.app/Contents/Resources/applet.icns
+CountdownMaster.app/Contents/Resources/applet.rsrc
+CountdownMaster.app/Contents/Resources/Assets.car
+CountdownMaster.app/Contents/Resources/description.rtfd/TXT.rtf
+CountdownMaster.app/Contents/Resources/Scripts/main.scpt

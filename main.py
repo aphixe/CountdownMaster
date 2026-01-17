@@ -10,9 +10,12 @@ from PySide6.QtCore import (
     QDate,
     QDateTime,
     QEvent,
+    QPoint,
     QPointF,
+    QPropertyAnimation,
     QRectF,
     QSettings,
+    Signal,
     QTimer,
     Qt,
     QTime,
@@ -102,6 +105,7 @@ class UiSettings:
     super_goal_bar_height: int = 8
     goal_pulse_seconds: float = 2.0
     always_on_top: bool = False
+    year_total_display: str = "hours"
 
 
 def qcolor_to_hex(color: QColor) -> str:
@@ -169,6 +173,7 @@ def format_percent(part_seconds: int, goal_seconds: int) -> str:
 LOGGER = logging.getLogger("countdown")
 HEATMAP_CELL_SIZE_MIN = 2
 HEATMAP_CELL_SIZE_MAX = 20
+YEAR_TOTAL_DISPLAY_MODES = ("hours", "days", "avg_week")
 
 
 def setup_logging(log_path: str) -> None:
@@ -748,6 +753,7 @@ class SettingsDialog(QDialog):
             super_goal_bar_height=self.super_goal_bar_height_spin.value(),
             goal_pulse_seconds=self.goal_pulse_spin.value(),
             always_on_top=self._settings.always_on_top,
+            year_total_display=self._settings.year_total_display,
         )
 
 
@@ -852,6 +858,15 @@ class AnimatedToggleButton(QPushButton):
     def leaveEvent(self, event) -> None:
         self._animate_press(0.0)
         super().leaveEvent(event)
+
+
+class ClickableLabel(QLabel):
+    clicked = Signal()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 class SuperGoalProgressBar(QWidget):
@@ -1453,6 +1468,8 @@ class CountdownWindow(QMainWindow):
             self.daily_totals,
             self.daily_goals,
         ) = self._load_log_entries()
+        self._last_added_time_entry = None
+        self._last_added_time_index = None
         self._active_session_start = None
         self._active_session_seconds = 0
         self._active_session_date_key = None
@@ -1480,6 +1497,7 @@ class CountdownWindow(QMainWindow):
         self._heatmap_year = QDate.currentDate().year()
         self._always_on_top = self.settings.always_on_top
         self._scale_factor = 1.0
+        self._year_total_anim = None
 
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
@@ -1491,6 +1509,7 @@ class CountdownWindow(QMainWindow):
         self.day_time_timer.start()
 
         self._build_ui()
+        self._apply_window_flag_defaults()
         self._window_save_timer = QTimer(self)
         self._window_save_timer.setSingleShot(True)
         self._window_save_timer.setInterval(250)
@@ -1551,9 +1570,11 @@ class CountdownWindow(QMainWindow):
             self.settings.super_goal_bar_bg,
         )
 
-        self.year_total_label = QLabel("Year total: 0d 00:00:00")
+        self.year_total_label = ClickableLabel("Year total: 00:00:00")
         self.year_total_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.year_total_label.setObjectName("yearTotalLabel")
+        self.year_total_label.setCursor(Qt.PointingHandCursor)
+        self.year_total_label.clicked.connect(self._cycle_year_total_display)
 
         self.status_label = QLabel("Right click to set goal time")
         self.status_label.setAlignment(Qt.AlignCenter)
@@ -1634,7 +1655,9 @@ class CountdownWindow(QMainWindow):
     def _build_context_menu(self):
         menu = QMenu(self)
         set_time = QAction("Set Current Goal", self)
-        add_time = QAction("Add Time", self)
+        add_time = QAction("Add to time", self)
+        undo_add_time = QAction("Undo added time", self)
+        undo_add_time.setEnabled(self._last_added_time_entry is not None)
         set_super_goal = QAction("Set Daily Super Goal", self)
         logs = QAction("Logs", self)
         trends_graph = QAction("Trends Graph", self)
@@ -1646,6 +1669,7 @@ class CountdownWindow(QMainWindow):
         quit_action = QAction("Quit", self)
         set_time.triggered.connect(self._open_set_time)
         add_time.triggered.connect(self._open_add_time)
+        undo_add_time.triggered.connect(self._undo_added_time)
         set_super_goal.triggered.connect(self._open_set_super_goal)
         logs.triggered.connect(self._open_logs)
         trends_graph.triggered.connect(self._open_trends_graph)
@@ -1655,6 +1679,7 @@ class CountdownWindow(QMainWindow):
         quit_action.triggered.connect(self._quit_app)
         menu.addAction(set_time)
         menu.addAction(add_time)
+        menu.addAction(undo_add_time)
         menu.addAction(set_super_goal)
         menu.addAction(logs)
         menu.addAction(trends_graph)
@@ -1702,21 +1727,65 @@ class CountdownWindow(QMainWindow):
         self._append_log_entry(
             date_key, start_time_str, end_time_str, duration, goal_seconds
         )
-        self.log_entries.append(
-            {
-                "date": date_key,
-                "start_time": start_time_str,
-                "end_time": end_time_str,
-                "duration_seconds": duration,
-                "goal_seconds": goal_seconds,
-            }
-        )
+        entry = {
+            "date": date_key,
+            "start_time": start_time_str,
+            "end_time": end_time_str,
+            "duration_seconds": duration,
+            "goal_seconds": goal_seconds,
+        }
+        self.log_entries.append(entry)
+        self._last_added_time_entry = entry
+        self._last_added_time_index = len(self.log_entries) - 1
         self.daily_totals[date_key] = self.daily_totals.get(date_key, 0) + duration
         if QDate.currentDate().year() != self._heatmap_year:
             self._refresh_heatmap()
         self._update_heatmap_cell(date_key)
         self._update_total_today_label()
         self.status_label.setText("Added time to today")
+
+    def _undo_added_time(self) -> None:
+        if self._last_added_time_entry is None or self._last_added_time_index is None:
+            self.status_label.setText("No added time to undo")
+            return
+        entry = self._last_added_time_entry
+        index = self._last_added_time_index
+        removed = False
+        if 0 <= index < len(self.log_entries) and self.log_entries[index] is entry:
+            self.log_entries.pop(index)
+            removed = True
+        else:
+            for i, existing in enumerate(self.log_entries):
+                if existing is entry:
+                    self.log_entries.pop(i)
+                    removed = True
+                    break
+            if not removed:
+                for i, existing in enumerate(self.log_entries):
+                    if existing == entry:
+                        self.log_entries.pop(i)
+                        removed = True
+                        break
+        self._last_added_time_entry = None
+        self._last_added_time_index = None
+        if not removed:
+            self.status_label.setText("Undo failed: entry not found")
+            return
+        date_key = str(entry.get("date"))
+        try:
+            duration = int(entry.get("duration_seconds", 0))
+        except (TypeError, ValueError):
+            duration = 0
+        if date_key:
+            updated = max(0, self.daily_totals.get(date_key, 0) - duration)
+            if updated <= 0:
+                self.daily_totals.pop(date_key, None)
+            else:
+                self.daily_totals[date_key] = updated
+            self._update_heatmap_cell(date_key)
+        self._rewrite_log_file(self.log_entries, self.daily_goals)
+        self._update_total_today_label()
+        self.status_label.setText("Undid added time")
 
     def _open_set_super_goal(self) -> None:
         hours, minutes = self._seconds_to_hm(self.super_goal_seconds)
@@ -2086,6 +2155,41 @@ class CountdownWindow(QMainWindow):
         total_seconds = self._total_seconds_for_day(date_key)
         return max(0, goal_seconds - total_seconds)
 
+    def _cycle_year_total_display(self) -> None:
+        try:
+            index = YEAR_TOTAL_DISPLAY_MODES.index(self.settings.year_total_display)
+        except ValueError:
+            index = 0
+        next_index = (index + 1) % len(YEAR_TOTAL_DISPLAY_MODES)
+        self.settings.year_total_display = YEAR_TOTAL_DISPLAY_MODES[next_index]
+        self._update_year_total_label()
+        QTimer.singleShot(0, self._animate_year_total_label)
+        self._save_settings()
+
+    def _year_total_tooltip(self, display: str) -> str:
+        if display == "hours":
+            return "Click to show days"
+        if display == "days":
+            return "Click to show avg/week"
+        return "Click to show total hours"
+
+    def _animate_year_total_label(self) -> None:
+        if self.year_total_label is None:
+            return
+        if self._year_total_anim is None:
+            self._year_total_anim = QPropertyAnimation(
+                self.year_total_label, b"pos", self
+            )
+            self._year_total_anim.setDuration(240)
+            self._year_total_anim.setEasingCurve(QEasingCurve.OutBounce)
+        else:
+            self._year_total_anim.stop()
+        base_pos = self.year_total_label.pos()
+        start_pos = QPoint(base_pos.x(), base_pos.y() - 10)
+        self._year_total_anim.setStartValue(start_pos)
+        self._year_total_anim.setEndValue(base_pos)
+        self._year_total_anim.start()
+
     def _update_year_total_label(self) -> None:
         current_year = QDate.currentDate().year()
         year_prefix = f"{current_year}-"
@@ -2099,14 +2203,33 @@ class CountdownWindow(QMainWindow):
             and self._active_session_date_key.startswith(year_prefix)
         ):
             total_seconds += self._active_session_seconds
-        days = total_seconds // 86400
-        remainder = total_seconds % 86400
-        hours = remainder // 3600
-        minutes = (remainder % 3600) // 60
-        seconds = remainder % 60
-        self.year_total_label.setText(
-            f"Year total: {days}d {hours:02d}:{minutes:02d}:{seconds:02d}"
-        )
+        display = self.settings.year_total_display
+        if display not in YEAR_TOTAL_DISPLAY_MODES:
+            display = "hours"
+            self.settings.year_total_display = display
+        if display == "days":
+            days = total_seconds // 86400
+            remainder = total_seconds % 86400
+            hours = remainder // 3600
+            minutes = (remainder % 3600) // 60
+            seconds = remainder % 60
+            text = f"Year total: {days}d {hours:02d}:{minutes:02d}:{seconds:02d}"
+        elif display == "avg_week":
+            start_of_year = QDate(current_year, 1, 1)
+            days_elapsed = start_of_year.daysTo(QDate.currentDate()) + 1
+            days_elapsed = max(1, days_elapsed)
+            avg_week_seconds = int(round(total_seconds * 7 / days_elapsed))
+            hours = avg_week_seconds // 3600
+            minutes = (avg_week_seconds % 3600) // 60
+            seconds = avg_week_seconds % 60
+            text = f"Year avg/week: {hours:02d}:{minutes:02d}:{seconds:02d}"
+        else:
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
+            text = f"Year total: {hours}:{minutes:02d}:{seconds:02d}"
+        self.year_total_label.setText(text)
+        self.year_total_label.setToolTip(self._year_total_tooltip(display))
 
     def _update_streak_labels(self) -> None:
         longest, current = self._calculate_streaks()
@@ -2129,6 +2252,7 @@ class CountdownWindow(QMainWindow):
                 flags |= Qt.WindowStaysOnTopHint
             else:
                 flags &= ~Qt.WindowStaysOnTopHint
+            flags = self._normalized_window_flags(flags)
             self.setWindowFlags(flags)
             if save:
                 self._save_settings()
@@ -2200,6 +2324,22 @@ class CountdownWindow(QMainWindow):
         if enabled:
             self.raise_()
             self.activateWindow()
+
+    def _apply_window_flag_defaults(self) -> None:
+        flags = self._normalized_window_flags(self.windowFlags())
+        if flags != self.windowFlags():
+            self.setWindowFlags(flags)
+
+    def _normalized_window_flags(self, flags: Qt.WindowFlags) -> Qt.WindowFlags:
+        if sys.platform != "win32":
+            return flags
+        required = (
+            Qt.WindowTitleHint
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinMaxButtonsHint
+            | Qt.WindowCloseButtonHint
+        )
+        return flags | required
 
     def _seconds_to_hm(self, total_seconds: int) -> tuple[int, int]:
         hours = total_seconds // 3600
@@ -2488,6 +2628,14 @@ class CountdownWindow(QMainWindow):
         ui.day_end_minute = int(
             settings.value("day_time/end_minute", ui.day_end_minute)
         )
+        year_total_display = settings.value(
+            "totals/year_display", ui.year_total_display
+        )
+        if isinstance(year_total_display, str):
+            year_total_display = year_total_display.strip().lower()
+        if year_total_display not in YEAR_TOTAL_DISPLAY_MODES:
+            year_total_display = ui.year_total_display
+        ui.year_total_display = year_total_display
         return ui
 
     def _load_super_goal_seconds(self) -> int:
@@ -2733,6 +2881,7 @@ class CountdownWindow(QMainWindow):
         settings.setValue("day_time/start_minute", self.settings.day_start_minute)
         settings.setValue("day_time/end_hour", self.settings.day_end_hour)
         settings.setValue("day_time/end_minute", self.settings.day_end_minute)
+        settings.setValue("totals/year_display", self.settings.year_total_display)
         settings.sync()
 
     def _save_super_goal(self) -> None:
