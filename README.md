@@ -14,6 +14,10 @@ PySide6 (Qt) and stores data locally in `data.csv` plus preferences in
 
 ## Features
 
+- (New) Clock On/off, just click to start tracking, no goal needed adds to your daily tracking
+- (New) Hide Menu UI, remove something you don't need so you can make size smaller
+- (New) Log, now shows week of tracking for the date selected
+- (New) Profiles, these profiles should have all the profiles you need, or add your own
 - Countdown timer with a “current goal” duration
 - Daily super goal tracking and goal-left indicator
 - Year heatmap of logged time, with adjustable cell size and month padding
