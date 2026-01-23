@@ -25,6 +25,11 @@ PySide6 (Qt) and stores data locally in `data.csv` plus preferences in
 - Customizable colors, fonts, and glow pulse duration
 - Always-on-top mode and saved window position/size
 
+## Screenshot
+
+![Countdown Master Screenshot](screenshot.png)
+![Countdown Master Log Screenshot](daily.png)
+![Countdown Master Trends Screenshot](Trends.png)
 ## Requirements
 
 - Python 3.9+ (PySide6 supports 3.8+)
@@ -86,11 +91,8 @@ run.bat
   cell size.
 - Settings lets you customize colors, fonts, glow duration, and heatmap layout.
 
-## Screenshot
-
-![Countdown Master Screenshot](screenshot.png)
 
 ## Data Files
 
-- `data.csv`: session history and daily totals
+- `active.csv`: Active profile, session history and daily totals
 - `settings.ini`: UI preferences, goals, and window geometry
