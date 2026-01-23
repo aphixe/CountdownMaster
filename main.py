@@ -16,6 +16,7 @@ from PySide6.QtCore import (
     QRectF,
     QSettings,
     Signal,
+    QSize,
     QTimer,
     Qt,
     QTime,
@@ -61,6 +62,7 @@ from PySide6.QtWidgets import (
     QGraphicsBlurEffect,
     QDateEdit,
     QTimeEdit,
+    QInputDialog,
 )
 
 try:
@@ -106,6 +108,18 @@ class UiSettings:
     goal_pulse_seconds: float = 2.0
     always_on_top: bool = False
     year_total_display: str = "hours"
+    week_start_day: int = 1
+    week_end_day: int = 7
+    show_heatmap: bool = True
+    show_day_time: bool = True
+    show_total_today: bool = True
+    show_year_total: bool = True
+    show_super_goal_left: bool = True
+    show_status_label: bool = True
+    show_start_button: bool = True
+    show_clock_button: bool = True
+    show_longest_streak: bool = True
+    show_current_streak: bool = True
 
 
 def qcolor_to_hex(color: QColor) -> str:
@@ -173,7 +187,18 @@ def format_percent(part_seconds: int, goal_seconds: int) -> str:
 LOGGER = logging.getLogger("countdown")
 HEATMAP_CELL_SIZE_MIN = 2
 HEATMAP_CELL_SIZE_MAX = 20
-YEAR_TOTAL_DISPLAY_MODES = ("hours", "days", "avg_week")
+YEAR_TOTAL_DISPLAY_MODES = ("hours", "days", "week", "avg_week")
+DEFAULT_PROFILES = (
+    ("Activate Immersion", "active.csv"),
+    ("Passive Immersion", "passive.csv"),
+    ("Phonetic Training", "phonetic.csv"),
+    ("Output", "output.csv"),
+    ("Soroban", "soroban.csv"),
+    ("Anki", "anki.csv"),
+)
+DEFAULT_PROFILE_NAME = "Activate Immersion"
+PROFILE_ACTION_ADD = "__add_profile__"
+PROFILE_ACTION_DELETE = "__delete_profile__"
 
 
 def setup_logging(log_path: str) -> None:
@@ -411,6 +436,27 @@ class SettingsDialog(QDialog):
         self.day_end_minute_spin.setRange(0, 59)
         self.day_end_minute_spin.setValue(ui_settings.day_end_minute)
 
+        self.week_start_combo = QComboBox()
+        self.week_end_combo = QComboBox()
+        week_days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        for day_value, label in enumerate(week_days, start=1):
+            self.week_start_combo.addItem(label, day_value)
+            self.week_end_combo.addItem(label, day_value)
+        start_index = self.week_start_combo.findData(ui_settings.week_start_day)
+        if start_index < 0:
+            start_index = 0
+        self.week_start_combo.setCurrentIndex(start_index)
+        end_index = self.week_end_combo.findData(ui_settings.week_end_day)
+        if end_index < 0:
+            end_index = len(week_days) - 1
+        self.week_end_combo.setCurrentIndex(end_index)
+        self._week_syncing = False
+        self.week_start_combo.currentIndexChanged.connect(
+            self._on_week_start_changed
+        )
+        self.week_end_combo.currentIndexChanged.connect(self._on_week_end_changed)
+        self._sync_week_end_from_start()
+
         self.total_today_font_spin = QSpinBox()
         self.total_today_font_spin.setRange(10, 48)
         self.total_today_font_spin.setValue(ui_settings.total_today_font_size)
@@ -548,6 +594,12 @@ class SettingsDialog(QDialog):
         totals_form.addRow("Super Goal Left Color", self.goal_left_btn)
         totals_group.setLayout(totals_form)
 
+        week_range_group = QGroupBox("Week Total Range")
+        week_range_form = QFormLayout()
+        week_range_form.addRow("Start Day", self.week_start_combo)
+        week_range_form.addRow("End Day", self.week_end_combo)
+        week_range_group.setLayout(week_range_form)
+
         super_goal_bar_group = QGroupBox("Super Goal Bar")
         super_goal_bar_form = QFormLayout()
         super_goal_bar_form.addRow("Width", self.super_goal_bar_width_spin)
@@ -564,6 +616,7 @@ class SettingsDialog(QDialog):
 
         day_layout.addWidget(day_time_group)
         day_layout.addWidget(totals_group)
+        day_layout.addWidget(week_range_group)
         day_layout.addWidget(super_goal_bar_group)
         day_layout.addWidget(pulse_group)
         day_layout.addStretch(1)
@@ -610,11 +663,31 @@ class SettingsDialog(QDialog):
         graph_layout.addStretch(1)
         graph_tab.setLayout(graph_layout)
 
+        appearance_scroll = QScrollArea()
+        appearance_scroll.setWidgetResizable(True)
+        appearance_scroll.setFrameShape(QFrame.NoFrame)
+        appearance_scroll.setWidget(appearance_tab)
+
+        day_scroll = QScrollArea()
+        day_scroll.setWidgetResizable(True)
+        day_scroll.setFrameShape(QFrame.NoFrame)
+        day_scroll.setWidget(day_tab)
+
+        heatmap_scroll = QScrollArea()
+        heatmap_scroll.setWidgetResizable(True)
+        heatmap_scroll.setFrameShape(QFrame.NoFrame)
+        heatmap_scroll.setWidget(heatmap_tab)
+
+        graph_scroll = QScrollArea()
+        graph_scroll.setWidgetResizable(True)
+        graph_scroll.setFrameShape(QFrame.NoFrame)
+        graph_scroll.setWidget(graph_tab)
+
         tabs = QTabWidget()
-        tabs.addTab(appearance_tab, "Appearance")
-        tabs.addTab(day_tab, "Day")
-        tabs.addTab(heatmap_tab, "Heatmap")
-        tabs.addTab(graph_tab, "Graph")
+        tabs.addTab(appearance_scroll, "Appearance")
+        tabs.addTab(day_scroll, "Day")
+        tabs.addTab(heatmap_scroll, "Heatmap")
+        tabs.addTab(graph_scroll, "Graph")
 
         buttons = QHBoxLayout()
         ok_btn = QPushButton("Save")
@@ -629,6 +702,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(tabs)
         layout.addLayout(buttons)
         self.setLayout(layout)
+        self.resize(520, 480)
 
     def _sync_color_btns(self) -> None:
         for btn, color in (
@@ -655,6 +729,34 @@ class SettingsDialog(QDialog):
                 f"background-color: {color.name()};"
                 "color: #111; padding: 6px; border-radius: 6px;"
             )
+
+    def _sync_week_end_from_start(self) -> None:
+        if self._week_syncing:
+            return
+        self._week_syncing = True
+        start_day = int(self.week_start_combo.currentData())
+        end_day = 7 if start_day == 1 else start_day - 1
+        end_index = self.week_end_combo.findData(end_day)
+        if end_index >= 0:
+            self.week_end_combo.setCurrentIndex(end_index)
+        self._week_syncing = False
+
+    def _sync_week_start_from_end(self) -> None:
+        if self._week_syncing:
+            return
+        self._week_syncing = True
+        end_day = int(self.week_end_combo.currentData())
+        start_day = 1 if end_day == 7 else end_day + 1
+        start_index = self.week_start_combo.findData(start_day)
+        if start_index >= 0:
+            self.week_start_combo.setCurrentIndex(start_index)
+        self._week_syncing = False
+
+    def _on_week_start_changed(self, index: int) -> None:
+        self._sync_week_end_from_start()
+
+    def _on_week_end_changed(self, index: int) -> None:
+        self._sync_week_start_from_end()
 
     def _pick_color(self, key: str) -> None:
         current = {
@@ -754,6 +856,18 @@ class SettingsDialog(QDialog):
             goal_pulse_seconds=self.goal_pulse_spin.value(),
             always_on_top=self._settings.always_on_top,
             year_total_display=self._settings.year_total_display,
+            week_start_day=int(self.week_start_combo.currentData()),
+            week_end_day=int(self.week_end_combo.currentData()),
+            show_heatmap=self._settings.show_heatmap,
+            show_day_time=self._settings.show_day_time,
+            show_total_today=self._settings.show_total_today,
+            show_year_total=self._settings.show_year_total,
+            show_super_goal_left=self._settings.show_super_goal_left,
+            show_status_label=self._settings.show_status_label,
+            show_start_button=self._settings.show_start_button,
+            show_clock_button=self._settings.show_clock_button,
+            show_longest_streak=self._settings.show_longest_streak,
+            show_current_streak=self._settings.show_current_streak,
         )
 
 
@@ -1387,12 +1501,19 @@ class LogsDialog(QDialog):
         self._fallback_goal_seconds = fallback_goal_seconds
         self._daily_totals = daily_totals
         self._settings = ui_settings
+        self.resize(820, 520)
 
         self.date_edit = QDateEdit(QDate.currentDate())
         self.date_edit.setCalendarPopup(True)
         self.date_edit.dateChanged.connect(self._refresh_table)
 
+        self.range_combo = QComboBox()
+        self.range_combo.addItems(["Day", "Week (7 days)"])
+        self.range_combo.currentIndexChanged.connect(self._refresh_table)
+
         self.goal_label = QLabel()
+        self.week_total_label = QLabel()
+        self.week_total_label.setVisible(False)
 
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
@@ -1408,6 +1529,9 @@ class LogsDialog(QDialog):
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Date"))
         controls.addWidget(self.date_edit)
+        controls.addSpacing(12)
+        controls.addWidget(QLabel("Range"))
+        controls.addWidget(self.range_combo)
         controls.addStretch(1)
 
         close_btn = QPushButton("Close")
@@ -1420,28 +1544,66 @@ class LogsDialog(QDialog):
         layout = QVBoxLayout()
         layout.addLayout(controls)
         layout.addWidget(self.goal_label)
+        layout.addWidget(self.week_total_label)
         layout.addWidget(self.table)
         layout.addLayout(footer)
         self.setLayout(layout)
 
         self._refresh_table()
 
+    def _goal_seconds_for_date(self, date_key: str) -> int:
+        return self._daily_goals.get(date_key, self._fallback_goal_seconds)
+
     def _refresh_table(self) -> None:
-        date_key = self.date_edit.date().toString("yyyy-MM-dd")
-        goal_seconds = self._daily_goals.get(date_key, self._fallback_goal_seconds)
+        selected_date = self.date_edit.date()
+        date_key = selected_date.toString("yyyy-MM-dd")
+        goal_seconds = self._goal_seconds_for_date(date_key)
         if goal_seconds > 0:
             self.goal_label.setText(
                 f"Daily super goal: {format_duration_hms(goal_seconds)}"
             )
         else:
             self.goal_label.setText("Daily super goal: not set")
-        rows = [entry for entry in self._entries if entry["date"] == date_key]
-        rows.sort(key=lambda entry: entry.get("start_time", ""))
+        range_mode = self.range_combo.currentText().lower()
+        if range_mode.startswith("week"):
+            start_date = selected_date
+            end_date = selected_date.addDays(6)
+            start_key = start_date.toString("yyyy-MM-dd")
+            end_key = end_date.toString("yyyy-MM-dd")
+            rows = [
+                entry
+                for entry in self._entries
+                if start_key <= str(entry.get("date", "")) <= end_key
+            ]
+            total_seconds = 0
+            date_cursor = start_date
+            while date_cursor <= end_date:
+                total_seconds += self._daily_totals.get(
+                    date_cursor.toString("yyyy-MM-dd"), 0
+                )
+                date_cursor = date_cursor.addDays(1)
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
+            self.week_total_label.setText(
+                f"Week total: {hours}:{minutes:02d}:{seconds:02d}"
+            )
+            self.week_total_label.setToolTip(
+                f"{start_date.toString('yyyy-MM-dd')} to "
+                f"{end_date.toString('yyyy-MM-dd')}"
+            )
+            self.week_total_label.setVisible(True)
+        else:
+            rows = [entry for entry in self._entries if entry["date"] == date_key]
+            self.week_total_label.setVisible(False)
+        rows.sort(key=lambda entry: (entry.get("date", ""), entry.get("start_time", "")))
         self.table.setRowCount(len(rows))
         for row_idx, entry in enumerate(rows):
             duration_seconds = int(entry["duration_seconds"])
             duration = format_duration_hms(duration_seconds)
-            percent = format_percent(duration_seconds, goal_seconds)
+            entry_date_key = str(entry.get("date", ""))
+            entry_goal_seconds = self._goal_seconds_for_date(entry_date_key)
+            percent = format_percent(duration_seconds, entry_goal_seconds)
             start_time = entry.get("start_time") or "N/A"
             end_time = entry.get("end_time") or "N/A"
             values = [entry["date"], start_time, end_time, duration, percent]
@@ -1460,9 +1622,13 @@ class CountdownWindow(QMainWindow):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
 
-        self._data_file_path = os.path.join(os.path.dirname(__file__), "data.csv")
+        self._data_dir = os.path.dirname(__file__)
         self.settings = self._load_settings()
         self.super_goal_seconds = self._load_super_goal_seconds()
+        self._default_profile_files = {label: fname for label, fname in DEFAULT_PROFILES}
+        self._custom_profiles = self._load_custom_profiles()
+        self._active_profile = self._load_active_profile()
+        self._data_file_path = self._profile_file_path(self._active_profile)
         (
             self.log_entries,
             self.daily_totals,
@@ -1475,6 +1641,8 @@ class CountdownWindow(QMainWindow):
         self._active_session_date_key = None
         self.remaining_seconds = 0
         self.timer_active = False
+        self.clock_active = False
+        self.clock_elapsed_seconds = 0
         self._acrylic_enabled = sys.platform == "win32"
         self._is_macos = sys.platform == "darwin"
         self._mac_blur_supported = self._is_macos and QMacVisualEffect is not None
@@ -1590,16 +1758,35 @@ class CountdownWindow(QMainWindow):
 
         self.heatmap_widget = self._build_heatmap()
 
+        self.profile_label = QLabel("Profile")
+        self.profile_label.setObjectName("profileLabel")
+        self.profile_combo = QComboBox()
+        self.profile_combo.setObjectName("profileCombo")
+        self.profile_combo.setMinimumWidth(180)
+        self._populate_profile_combo()
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+
         self.toggle_btn = AnimatedToggleButton("Start")
         self.toggle_btn.clicked.connect(self._toggle_timer)
+        self.clock_btn = AnimatedToggleButton("Clock On")
+        self.clock_btn.clicked.connect(self._toggle_clock)
 
         button_row = QHBoxLayout()
+        button_row.setSpacing(12)
         button_row.addStretch(1)
         button_row.addWidget(self.toggle_btn)
+        button_row.addWidget(self.clock_btn)
         button_row.addStretch(1)
 
         content = QWidget()
         content_layout = QVBoxLayout()
+        profile_row = QHBoxLayout()
+        profile_row.setContentsMargins(0, 0, 0, 0)
+        profile_row.setSpacing(8)
+        profile_row.addWidget(self.profile_label)
+        profile_row.addWidget(self.profile_combo)
+        profile_row.addStretch(1)
+        content_layout.addLayout(profile_row)
         content_layout.addStretch(1)
         content_layout.addWidget(self.timer_label)
         content_layout.addWidget(self.day_time_label)
@@ -1608,14 +1795,14 @@ class CountdownWindow(QMainWindow):
         goal_row_layout = QHBoxLayout()
         goal_row_layout.setContentsMargins(0, 0, 0, 0)
         goal_row_layout.setSpacing(12)
-        goal_left_group = QWidget()
+        self.goal_left_group = QWidget()
         goal_left_layout = QHBoxLayout()
         goal_left_layout.setContentsMargins(0, 0, 0, 0)
         goal_left_layout.setSpacing(8)
         goal_left_layout.addWidget(self.goal_left_label)
         goal_left_layout.addWidget(self.super_goal_bar)
-        goal_left_group.setLayout(goal_left_layout)
-        goal_row_layout.addWidget(goal_left_group)
+        self.goal_left_group.setLayout(goal_left_layout)
+        goal_row_layout.addWidget(self.goal_left_group)
         goal_row_layout.addStretch(1)
         goal_row_layout.addWidget(self.year_total_label)
         goal_row.setLayout(goal_row_layout)
@@ -1638,15 +1825,15 @@ class CountdownWindow(QMainWindow):
 
         self.glow_frame = GlowFrame()
 
-        stack = QStackedLayout()
-        stack.setStackingMode(QStackedLayout.StackAll)
-        stack.setContentsMargins(18, 18, 18, 18)
+        self.stack_layout = QStackedLayout()
+        self.stack_layout.setStackingMode(QStackedLayout.StackAll)
+        self.stack_layout.setContentsMargins(18, 18, 18, 18)
         if self.mac_visual_effect is not None:
-            stack.addWidget(self.mac_visual_effect)
-        stack.addWidget(self.background)
-        stack.addWidget(content)
-        stack.addWidget(self.glow_frame)
-        self.central.setLayout(stack)
+            self.stack_layout.addWidget(self.mac_visual_effect)
+        self.stack_layout.addWidget(self.background)
+        self.stack_layout.addWidget(content)
+        self.stack_layout.addWidget(self.glow_frame)
+        self.central.setLayout(self.stack_layout)
 
     def _show_context_menu(self, pos) -> None:
         menu = self._build_context_menu()
@@ -1677,6 +1864,41 @@ class CountdownWindow(QMainWindow):
         reset_time.triggered.connect(self._reset_timer)
         settings.triggered.connect(self._open_settings)
         quit_action.triggered.connect(self._quit_app)
+        visibility_menu = menu.addMenu("Show/Hide UI")
+        self._add_visibility_action(
+            visibility_menu, "Heat map", "show_heatmap"
+        )
+        self._add_visibility_action(
+            visibility_menu, "Day time left", "show_day_time"
+        )
+        self._add_visibility_action(
+            visibility_menu, "Total today", "show_total_today"
+        )
+        self._add_visibility_action(
+            visibility_menu, "Year total (week/avg)", "show_year_total"
+        )
+        self._add_visibility_action(
+            visibility_menu, "Super goal left", "show_super_goal_left"
+        )
+        self._add_visibility_action(
+            visibility_menu, "Status text (set goal time)", "show_status_label"
+        )
+        self._add_visibility_action(
+            visibility_menu, "Start button", "show_start_button"
+        )
+        self._add_visibility_action(
+            visibility_menu, "Clock button", "show_clock_button"
+        )
+        self._add_visibility_action(
+            visibility_menu, "Longest streak", "show_longest_streak"
+        )
+        self._add_visibility_action(
+            visibility_menu, "Current streak", "show_current_streak"
+        )
+        visibility_menu.addSeparator()
+        reset_visibility = QAction("Reset UI Visibility", self)
+        reset_visibility.triggered.connect(self._reset_ui_visibility)
+        visibility_menu.addAction(reset_visibility)
         menu.addAction(set_time)
         menu.addAction(add_time)
         menu.addAction(undo_add_time)
@@ -1835,11 +2057,15 @@ class CountdownWindow(QMainWindow):
         if self.timer.isActive():
             self.timer.stop()
         self.timer_active = False
+        self.clock_active = False
         self._finalize_session()
         self.remaining_seconds = 0
+        self.clock_elapsed_seconds = 0
         self._update_timer_label()
         self.toggle_btn.setText("Start")
         self.toggle_btn.set_state(False)
+        self.clock_btn.setText("Clock On")
+        self.clock_btn.set_state(False)
         self._update_total_today_label()
         self.status_label.setText("Timer reset")
 
@@ -1875,6 +2101,9 @@ class CountdownWindow(QMainWindow):
         self.total_today_label.setStyleSheet(
             f"color: {qcolor_to_hex(self.settings.total_today_color)};"
         )
+        self.profile_label.setStyleSheet(
+            f"color: {qcolor_to_hex(self.settings.total_today_color)};"
+        )
         self.goal_left_label.setStyleSheet(
             f"color: {qcolor_to_hex(self.settings.goal_left_color)};"
         )
@@ -1906,7 +2135,11 @@ class CountdownWindow(QMainWindow):
         self.toggle_btn.set_colors(
             self.settings.accent_color, self.settings.text_color
         )
-        self.toggle_btn.set_state(self.timer.isActive(), animate=False)
+        self.toggle_btn.set_state(self.timer_active, animate=False)
+        self.clock_btn.set_colors(
+            self.settings.accent_color, self.settings.text_color
+        )
+        self.clock_btn.set_state(self.clock_active, animate=False)
         self._heatmap_base_size = self.settings.heatmap_cell_size
         self._heatmap_month_padding_base = self.settings.heatmap_month_padding
         self._heatmap_month_label_size_base = self.settings.heatmap_month_label_size
@@ -1916,6 +2149,7 @@ class CountdownWindow(QMainWindow):
         self._update_day_time_label()
         self._update_total_today_label()
         self._update_goal_left_label()
+        self._apply_visibility_settings()
 
         if self._acrylic_enabled:
             border_color = self.settings.text_color
@@ -1955,6 +2189,9 @@ class CountdownWindow(QMainWindow):
         self.total_today_label.setFont(
             QFont(self._font_family, total_today_size)
         )
+        self.profile_label.setFont(QFont(self._font_family, label_size))
+        self.profile_combo.setFont(QFont(self._font_family, label_size))
+        self.profile_combo.setMinimumWidth(max(150, int(180 * scale)))
         self.goal_left_label.setFont(
             QFont(self._font_family, goal_left_size)
         )
@@ -1971,6 +2208,7 @@ class CountdownWindow(QMainWindow):
             QFont(self._font_family, label_size)
         )
         self.toggle_btn.set_scale(scale)
+        self.clock_btn.set_scale(scale)
         self._heatmap_month_label_size = max(
             6, int(self._heatmap_month_label_size_base * scale)
         )
@@ -1993,6 +2231,57 @@ class CountdownWindow(QMainWindow):
         base_height = max(1, self._base_window_size.height())
         scale = min(self.width() / base_width, self.height() / base_height)
         self._scale_factor = max(0.75, min(2.0, scale))
+
+    def _apply_visibility_settings(self) -> None:
+        self.heatmap_widget.setVisible(self.settings.show_heatmap)
+        self.day_time_label.setVisible(self.settings.show_day_time)
+        self.total_today_label.setVisible(self.settings.show_total_today)
+        self.year_total_label.setVisible(self.settings.show_year_total)
+        self.goal_left_group.setVisible(self.settings.show_super_goal_left)
+        self.status_label.setVisible(self.settings.show_status_label)
+        self.toggle_btn.setVisible(self.settings.show_start_button)
+        self.clock_btn.setVisible(self.settings.show_clock_button)
+        self.longest_streak_label.setVisible(self.settings.show_longest_streak)
+        self.current_streak_label.setVisible(self.settings.show_current_streak)
+        self._apply_stack_margins()
+        self._update_minimum_size_for_visibility()
+
+    def _apply_stack_margins(self) -> None:
+        if not hasattr(self, "stack_layout"):
+            return
+        if self._all_ui_visible():
+            margins = 18
+        else:
+            margins = 8
+        self.stack_layout.setContentsMargins(margins, margins, margins, margins)
+
+    def _all_ui_visible(self) -> bool:
+        return (
+            self.settings.show_heatmap
+            and self.settings.show_day_time
+            and self.settings.show_total_today
+            and self.settings.show_year_total
+            and self.settings.show_super_goal_left
+            and self.settings.show_status_label
+            and self.settings.show_start_button
+            and self.settings.show_clock_button
+            and self.settings.show_longest_streak
+            and self.settings.show_current_streak
+        )
+
+    def _visibility_minimum_size(self) -> QSize:
+        if self._all_ui_visible():
+            return self._base_window_size
+        return QSize(240, 170)
+
+    def _update_minimum_size_for_visibility(self) -> None:
+        target_size = self._visibility_minimum_size()
+        self.setMinimumSize(target_size)
+        if self.width() < target_size.width() or self.height() < target_size.height():
+            self.resize(
+                max(self.width(), target_size.width()),
+                max(self.height(), target_size.height()),
+            )
 
     def _apply_scaled_heatmap_size(self) -> bool:
         scaled_size = int(round(self._heatmap_base_size * self._scale_factor))
@@ -2025,17 +2314,15 @@ class CountdownWindow(QMainWindow):
             self.heatmap_widget.setFixedHeight(total_height)
 
     def _toggle_timer(self) -> None:
-        if self.timer.isActive():
-            self.timer.stop()
-            self.timer_active = False
-            self._finalize_session()
-            self.toggle_btn.setText("Start")
-            self.toggle_btn.set_state(False)
-            self.status_label.setText("Paused")
+        if self.clock_active:
+            self._stop_clock("Clock off")
+        if self.timer_active:
+            self._stop_countdown("Paused")
             return
         if self.remaining_seconds <= 0:
             self.status_label.setText("Set a goal time first")
             return
+        self._update_timer_label()
         self.timer.start()
         self.timer_active = True
         self._begin_session()
@@ -2043,7 +2330,50 @@ class CountdownWindow(QMainWindow):
         self.toggle_btn.set_state(True)
         self.status_label.setText("Counting down")
 
+    def _toggle_clock(self) -> None:
+        if self.clock_active:
+            self._stop_clock("Clock off")
+            return
+        if self.timer_active:
+            self._stop_countdown("Paused")
+        self.clock_elapsed_seconds = 0
+        self._update_timer_label(self.clock_elapsed_seconds)
+        self.timer.start()
+        self.timer_active = False
+        self.clock_active = True
+        self._begin_session()
+        self.clock_btn.setText("Clock Off")
+        self.clock_btn.set_state(True)
+        self.status_label.setText("Clocking")
+
+    def _stop_countdown(self, status_text: str) -> None:
+        if not self.timer_active:
+            return
+        if self.timer.isActive():
+            self.timer.stop()
+        self.timer_active = False
+        self._finalize_session()
+        self.toggle_btn.setText("Start")
+        self.toggle_btn.set_state(False)
+        self.status_label.setText(status_text)
+
+    def _stop_clock(self, status_text: str) -> None:
+        if not self.clock_active:
+            return
+        if self.timer.isActive():
+            self.timer.stop()
+        self.clock_active = False
+        self._finalize_session()
+        self.clock_btn.setText("Clock On")
+        self.clock_btn.set_state(False)
+        self.status_label.setText(status_text)
+
     def _tick(self) -> None:
+        if self.clock_active:
+            self.clock_elapsed_seconds += 1
+            self._record_super_goal_progress(1)
+            self._update_timer_label(self.clock_elapsed_seconds)
+            return
         if self.remaining_seconds <= 0:
             self._handle_time_up()
             return
@@ -2053,10 +2383,13 @@ class CountdownWindow(QMainWindow):
         if self.remaining_seconds <= 0:
             self._handle_time_up()
 
-    def _update_timer_label(self) -> None:
-        hours = self.remaining_seconds // 3600
-        minutes = (self.remaining_seconds % 3600) // 60
-        seconds = self.remaining_seconds % 60
+    def _update_timer_label(self, total_seconds: Optional[int] = None) -> None:
+        if total_seconds is None:
+            total_seconds = self.remaining_seconds
+        total_seconds = max(0, int(total_seconds))
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
         self.timer_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
 
     def _handle_time_up(self) -> None:
@@ -2170,8 +2503,17 @@ class CountdownWindow(QMainWindow):
         if display == "hours":
             return "Click to show days"
         if display == "days":
+            return "Click to show week total"
+        if display == "week":
             return "Click to show avg/week"
         return "Click to show total hours"
+
+    def _week_range_for_date(self, date: QDate) -> tuple[QDate, QDate]:
+        end_day = max(1, min(7, int(self.settings.week_end_day)))
+        delta = (date.dayOfWeek() - end_day) % 7
+        end = date.addDays(-delta)
+        start = end.addDays(-6)
+        return start, end
 
     def _animate_year_total_label(self) -> None:
         if self.year_total_label is None:
@@ -2214,6 +2556,18 @@ class CountdownWindow(QMainWindow):
             minutes = (remainder % 3600) // 60
             seconds = remainder % 60
             text = f"Year total: {days}d {hours:02d}:{minutes:02d}:{seconds:02d}"
+        elif display == "week":
+            today = QDate.currentDate()
+            start_of_week, end_of_week = self._week_range_for_date(today)
+            week_seconds = 0
+            date = start_of_week
+            while date <= end_of_week:
+                week_seconds += self._total_seconds_for_day(self._date_key(date))
+                date = date.addDays(1)
+            hours = week_seconds // 3600
+            minutes = (week_seconds % 3600) // 60
+            seconds = week_seconds % 60
+            text = f"Week total: {hours}:{minutes:02d}:{seconds:02d}"
         elif display == "avg_week":
             start_of_year = QDate(current_year, 1, 1)
             days_elapsed = start_of_year.daysTo(QDate.currentDate()) + 1
@@ -2324,6 +2678,37 @@ class CountdownWindow(QMainWindow):
         if enabled:
             self.raise_()
             self.activateWindow()
+
+    def _add_visibility_action(
+        self, menu: QMenu, label: str, setting_key: str
+    ) -> QAction:
+        action = QAction(label, self)
+        action.setCheckable(True)
+        action.setChecked(getattr(self.settings, setting_key))
+        action.toggled.connect(
+            lambda checked, key=setting_key: self._toggle_ui_setting(key, checked)
+        )
+        menu.addAction(action)
+        return action
+
+    def _toggle_ui_setting(self, setting_key: str, enabled: bool) -> None:
+        setattr(self.settings, setting_key, enabled)
+        self._apply_visibility_settings()
+        self._save_settings()
+
+    def _reset_ui_visibility(self) -> None:
+        self.settings.show_heatmap = True
+        self.settings.show_day_time = True
+        self.settings.show_total_today = True
+        self.settings.show_year_total = True
+        self.settings.show_super_goal_left = True
+        self.settings.show_status_label = True
+        self.settings.show_start_button = True
+        self.settings.show_clock_button = True
+        self.settings.show_longest_streak = True
+        self.settings.show_current_streak = True
+        self._apply_visibility_settings()
+        self._save_settings()
 
     def _apply_window_flag_defaults(self) -> None:
         flags = self._normalized_window_flags(self.windowFlags())
@@ -2628,6 +3013,23 @@ class CountdownWindow(QMainWindow):
         ui.day_end_minute = int(
             settings.value("day_time/end_minute", ui.day_end_minute)
         )
+        try:
+            week_start_day = int(
+                settings.value("totals/week_start_day", ui.week_start_day)
+            )
+        except (TypeError, ValueError):
+            week_start_day = ui.week_start_day
+        try:
+            week_end_day = int(
+                settings.value("totals/week_end_day", ui.week_end_day)
+            )
+        except (TypeError, ValueError):
+            week_end_day = ui.week_end_day
+        ui.week_start_day = max(1, min(7, week_start_day))
+        ui.week_end_day = max(1, min(7, week_end_day))
+        expected_end = 7 if ui.week_start_day == 1 else ui.week_start_day - 1
+        if ui.week_end_day != expected_end:
+            ui.week_end_day = expected_end
         year_total_display = settings.value(
             "totals/year_display", ui.year_total_display
         )
@@ -2636,6 +3038,44 @@ class CountdownWindow(QMainWindow):
         if year_total_display not in YEAR_TOTAL_DISPLAY_MODES:
             year_total_display = ui.year_total_display
         ui.year_total_display = year_total_display
+        ui.show_heatmap = parse_bool(
+            settings.value("ui/show_heatmap", ui.show_heatmap), ui.show_heatmap
+        )
+        ui.show_day_time = parse_bool(
+            settings.value("ui/show_day_time", ui.show_day_time), ui.show_day_time
+        )
+        ui.show_total_today = parse_bool(
+            settings.value("ui/show_total_today", ui.show_total_today),
+            ui.show_total_today,
+        )
+        ui.show_year_total = parse_bool(
+            settings.value("ui/show_year_total", ui.show_year_total),
+            ui.show_year_total,
+        )
+        ui.show_super_goal_left = parse_bool(
+            settings.value("ui/show_super_goal_left", ui.show_super_goal_left),
+            ui.show_super_goal_left,
+        )
+        ui.show_status_label = parse_bool(
+            settings.value("ui/show_status_label", ui.show_status_label),
+            ui.show_status_label,
+        )
+        ui.show_start_button = parse_bool(
+            settings.value("ui/show_start_button", ui.show_start_button),
+            ui.show_start_button,
+        )
+        ui.show_clock_button = parse_bool(
+            settings.value("ui/show_clock_button", ui.show_clock_button),
+            ui.show_clock_button,
+        )
+        ui.show_longest_streak = parse_bool(
+            settings.value("ui/show_longest_streak", ui.show_longest_streak),
+            ui.show_longest_streak,
+        )
+        ui.show_current_streak = parse_bool(
+            settings.value("ui/show_current_streak", ui.show_current_streak),
+            ui.show_current_streak,
+        )
         return ui
 
     def _load_super_goal_seconds(self) -> int:
@@ -2781,8 +3221,192 @@ class CountdownWindow(QMainWindow):
         except (TypeError, ValueError):
             return fallback
 
+    def _load_custom_profiles(self) -> list[str]:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        value = settings.value("profiles/custom", [])
+        if isinstance(value, str):
+            raw = [item.strip() for item in value.split("|")]
+        elif isinstance(value, (list, tuple)):
+            raw = [str(item).strip() for item in value]
+        else:
+            raw = []
+        labels: list[str] = []
+        seen = set()
+        for label in raw:
+            if not label:
+                continue
+            if self._is_profile_label_reserved(label):
+                continue
+            key = label.strip().lower()
+            if key in seen:
+                continue
+            if label in self._default_profile_files:
+                continue
+            seen.add(key)
+            labels.append(label)
+        return labels
+
+    def _load_active_profile(self) -> str:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        active = settings.value("profiles/active", DEFAULT_PROFILE_NAME)
+        if not isinstance(active, str):
+            active = DEFAULT_PROFILE_NAME
+        active = active.strip() or DEFAULT_PROFILE_NAME
+        if active not in self._profile_labels():
+            active = DEFAULT_PROFILE_NAME
+        return active
+
+    def _save_profile_settings(self) -> None:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings.setValue("profiles/active", self._active_profile)
+        settings.setValue("profiles/custom", self._custom_profiles)
+        settings.sync()
+
+    def _profile_labels(self) -> list[str]:
+        return list(self._default_profile_files.keys()) + list(self._custom_profiles)
+
+    def _profile_filename(self, label: str) -> str:
+        if label in self._default_profile_files:
+            return self._default_profile_files[label]
+        clean = label.strip()
+        if clean.lower().endswith(".csv"):
+            clean = clean[:-4]
+        return f"{clean}.csv"
+
+    def _profile_file_path(self, label: str) -> str:
+        return os.path.join(self._data_dir, self._profile_filename(label))
+
+    def _is_profile_label_reserved(self, label: str) -> bool:
+        return label.strip().lower() in ("add profile", "delete profile")
+
+    def _profile_exists(self, label: str) -> bool:
+        return any(
+            existing.lower() == label.strip().lower()
+            for existing in self._profile_labels()
+        )
+
+    def _populate_profile_combo(self) -> None:
+        if not hasattr(self, "profile_combo"):
+            return
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        for label in self._profile_labels():
+            self.profile_combo.addItem(label, label)
+        self.profile_combo.insertSeparator(self.profile_combo.count())
+        self.profile_combo.addItem("Add profile", PROFILE_ACTION_ADD)
+        self.profile_combo.addItem("Delete profile", PROFILE_ACTION_DELETE)
+        self._restore_profile_selection()
+        self.profile_combo.blockSignals(False)
+
+    def _restore_profile_selection(self) -> None:
+        if not hasattr(self, "profile_combo"):
+            return
+        for index in range(self.profile_combo.count()):
+            if self.profile_combo.itemData(index) == self._active_profile:
+                self.profile_combo.setCurrentIndex(index)
+                return
+
+    def _on_profile_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        data = self.profile_combo.itemData(index)
+        if data == PROFILE_ACTION_ADD:
+            self._prompt_add_profile()
+            return
+        if data == PROFILE_ACTION_DELETE:
+            self._prompt_delete_profile()
+            return
+        if isinstance(data, str) and data:
+            if data == self._active_profile:
+                return
+            self._switch_profile(data)
+
+    def _prompt_add_profile(self) -> None:
+        name, ok = QInputDialog.getText(
+            self, "Add Profile", "Profile name"
+        )
+        if not ok:
+            self._restore_profile_selection()
+            return
+        label = name.strip()
+        if label.lower().endswith(".csv"):
+            label = label[:-4].strip()
+        if not label:
+            self.status_label.setText("Profile name cannot be empty")
+            self._restore_profile_selection()
+            return
+        if any(sep in label for sep in ("/", "\\", ":")):
+            self.status_label.setText("Profile name cannot include path separators")
+            self._restore_profile_selection()
+            return
+        if self._is_profile_label_reserved(label) or self._profile_exists(label):
+            self.status_label.setText("Profile already exists")
+            self._restore_profile_selection()
+            return
+        self._custom_profiles.append(label)
+        self._active_profile = label
+        self._data_file_path = self._profile_file_path(label)
+        self._save_profile_settings()
+        self._populate_profile_combo()
+        self._switch_profile(label)
+
+    def _prompt_delete_profile(self) -> None:
+        options = list(self._custom_profiles)
+        if not options:
+            self.status_label.setText("No custom profiles to delete")
+            self._restore_profile_selection()
+            return
+        selected, ok = QInputDialog.getItem(
+            self, "Delete Profile", "Select profile", options, 0, False
+        )
+        if not ok or not selected:
+            self._restore_profile_selection()
+            return
+        label = str(selected)
+        was_active = label == self._active_profile
+        if label in self._custom_profiles:
+            self._custom_profiles.remove(label)
+        path = self._profile_file_path(label)
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                LOGGER.exception("Failed to delete profile file")
+        if was_active:
+            self._active_profile = DEFAULT_PROFILE_NAME
+        self._save_profile_settings()
+        self._populate_profile_combo()
+        if was_active:
+            self._switch_profile(self._active_profile)
+        else:
+            self._restore_profile_selection()
+
+    def _switch_profile(self, label: str) -> None:
+        if self.timer_active:
+            self._stop_countdown("Paused")
+        if self.clock_active:
+            self._stop_clock("Clock off")
+        self._active_profile = label
+        self._data_file_path = self._profile_file_path(label)
+        self._last_added_time_entry = None
+        self._last_added_time_index = None
+        self._active_session_start = None
+        self._active_session_seconds = 0
+        self._active_session_date_key = None
+        (
+            self.log_entries,
+            self.daily_totals,
+            self.daily_goals,
+        ) = self._load_log_entries()
+        self._refresh_heatmap()
+        self._update_total_today_label()
+        self._update_timer_label()
+        self.status_label.setText(f"Profile: {label}")
+        self._save_profile_settings()
+
     def _restore_window_geometry(self) -> None:
         settings = QSettings("settings.ini", QSettings.IniFormat)
+        self.setMinimumSize(self._visibility_minimum_size())
         width = self._read_int_setting(settings, "window/width", None)
         height = self._read_int_setting(settings, "window/height", None)
         if width is not None and height is not None:
@@ -2882,6 +3506,28 @@ class CountdownWindow(QMainWindow):
         settings.setValue("day_time/end_hour", self.settings.day_end_hour)
         settings.setValue("day_time/end_minute", self.settings.day_end_minute)
         settings.setValue("totals/year_display", self.settings.year_total_display)
+        settings.setValue("totals/week_start_day", self.settings.week_start_day)
+        settings.setValue("totals/week_end_day", self.settings.week_end_day)
+        settings.setValue("ui/show_heatmap", int(self.settings.show_heatmap))
+        settings.setValue("ui/show_day_time", int(self.settings.show_day_time))
+        settings.setValue("ui/show_total_today", int(self.settings.show_total_today))
+        settings.setValue("ui/show_year_total", int(self.settings.show_year_total))
+        settings.setValue(
+            "ui/show_super_goal_left", int(self.settings.show_super_goal_left)
+        )
+        settings.setValue("ui/show_status_label", int(self.settings.show_status_label))
+        settings.setValue(
+            "ui/show_start_button", int(self.settings.show_start_button)
+        )
+        settings.setValue(
+            "ui/show_clock_button", int(self.settings.show_clock_button)
+        )
+        settings.setValue(
+            "ui/show_longest_streak", int(self.settings.show_longest_streak)
+        )
+        settings.setValue(
+            "ui/show_current_streak", int(self.settings.show_current_streak)
+        )
         settings.sync()
 
     def _save_super_goal(self) -> None:
