@@ -14,6 +14,7 @@ PySide6 (Qt) and stores data locally in `data.csv` plus preferences in
 
 ## Features
 
+- (New) Hotkey setting in right click to toggle buttons on off with keyboard or gamepad using xinput
 - (New) Clock On/off, just click to start tracking, no goal needed adds to your daily tracking
 - (New) Hide Menu UI, remove something you don't need so you can make size smaller
 - (New) Log, now shows week of tracking for the date selected

@@ -1,4 +1,5 @@
 import csv
+import ctypes
 import math
 import logging
 import os
@@ -29,10 +30,12 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontDatabase,
+    QKeySequence,
     QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
+    QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -63,6 +66,7 @@ from PySide6.QtWidgets import (
     QDateEdit,
     QTimeEdit,
     QInputDialog,
+    QKeySequenceEdit,
 )
 
 try:
@@ -120,6 +124,82 @@ class UiSettings:
     show_clock_button: bool = True
     show_longest_streak: bool = True
     show_current_streak: bool = True
+
+
+@dataclass
+class HotkeySettings:
+    start_hotkey: str = ""
+    clock_hotkey: str = ""
+    start_xinput_button: str = ""
+    clock_xinput_button: str = ""
+
+
+XINPUT_BUTTONS = {
+    "DPad Up": 0x0001,
+    "DPad Down": 0x0002,
+    "DPad Left": 0x0004,
+    "DPad Right": 0x0008,
+    "Start": 0x0010,
+    "Back": 0x0020,
+    "Left Stick": 0x0040,
+    "Right Stick": 0x0080,
+    "Left Shoulder": 0x0100,
+    "Right Shoulder": 0x0200,
+    "A": 0x1000,
+    "B": 0x2000,
+    "X": 0x4000,
+    "Y": 0x8000,
+}
+
+
+class XINPUT_GAMEPAD(ctypes.Structure):
+    _fields_ = [
+        ("wButtons", ctypes.c_ushort),
+        ("bLeftTrigger", ctypes.c_ubyte),
+        ("bRightTrigger", ctypes.c_ubyte),
+        ("sThumbLX", ctypes.c_short),
+        ("sThumbLY", ctypes.c_short),
+        ("sThumbRX", ctypes.c_short),
+        ("sThumbRY", ctypes.c_short),
+    ]
+
+
+class XINPUT_STATE(ctypes.Structure):
+    _fields_ = [
+        ("dwPacketNumber", ctypes.c_ulong),
+        ("Gamepad", XINPUT_GAMEPAD),
+    ]
+
+
+class XInputReader:
+    def __init__(self) -> None:
+        self._dll = self._load_xinput()
+        self.available = self._dll is not None
+        if self.available:
+            self._dll.XInputGetState.argtypes = [
+                ctypes.c_uint,
+                ctypes.POINTER(XINPUT_STATE),
+            ]
+            self._dll.XInputGetState.restype = ctypes.c_uint
+
+    def _load_xinput(self):
+        if sys.platform != "win32" or not hasattr(ctypes, "WinDLL"):
+            return None
+        for dll_name in ("xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"):
+            try:
+                return ctypes.WinDLL(dll_name)
+            except Exception:
+                continue
+        return None
+
+    def read_buttons(self, index: int = 0) -> Optional[int]:
+        if not self.available:
+            return None
+        state = XINPUT_STATE()
+        result = self._dll.XInputGetState(index, ctypes.byref(state))
+        if result != 0:
+            return None
+        return int(state.Gamepad.wButtons)
 
 
 def qcolor_to_hex(color: QColor) -> str:
@@ -868,6 +948,106 @@ class SettingsDialog(QDialog):
             show_clock_button=self._settings.show_clock_button,
             show_longest_streak=self._settings.show_longest_streak,
             show_current_streak=self._settings.show_current_streak,
+        )
+
+
+class HotkeySettingsDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        hotkey_settings: HotkeySettings,
+        xinput_available: bool,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Hotkey Settings")
+        self.setModal(True)
+        self._settings = hotkey_settings
+
+        self.start_hotkey_edit = QKeySequenceEdit()
+        self.start_hotkey_edit.setKeySequence(
+            QKeySequence(hotkey_settings.start_hotkey)
+        )
+        self.clock_hotkey_edit = QKeySequenceEdit()
+        self.clock_hotkey_edit.setKeySequence(
+            QKeySequence(hotkey_settings.clock_hotkey)
+        )
+
+        start_clear = QPushButton("Clear")
+        start_clear.clicked.connect(
+            lambda: self.start_hotkey_edit.setKeySequence(QKeySequence())
+        )
+        clock_clear = QPushButton("Clear")
+        clock_clear.clicked.connect(
+            lambda: self.clock_hotkey_edit.setKeySequence(QKeySequence())
+        )
+
+        start_hotkey_row = QHBoxLayout()
+        start_hotkey_row.addWidget(self.start_hotkey_edit)
+        start_hotkey_row.addWidget(start_clear)
+
+        clock_hotkey_row = QHBoxLayout()
+        clock_hotkey_row.addWidget(self.clock_hotkey_edit)
+        clock_hotkey_row.addWidget(clock_clear)
+
+        keyboard_group = QGroupBox("Keyboard")
+        keyboard_form = QFormLayout()
+        keyboard_form.addRow("Start toggle", start_hotkey_row)
+        keyboard_form.addRow("Clock toggle", clock_hotkey_row)
+        keyboard_group.setLayout(keyboard_form)
+
+        self.start_xinput_combo = QComboBox()
+        self.clock_xinput_combo = QComboBox()
+        self._populate_xinput_combo(self.start_xinput_combo)
+        self._populate_xinput_combo(self.clock_xinput_combo)
+        self._set_combo_value(
+            self.start_xinput_combo, hotkey_settings.start_xinput_button
+        )
+        self._set_combo_value(
+            self.clock_xinput_combo, hotkey_settings.clock_xinput_button
+        )
+
+        xinput_group = QGroupBox("XInput")
+        xinput_form = QFormLayout()
+        xinput_form.addRow("Start toggle", self.start_xinput_combo)
+        xinput_form.addRow("Clock toggle", self.clock_xinput_combo)
+        xinput_group.setLayout(xinput_form)
+        if not xinput_available:
+            xinput_group.setEnabled(False)
+            xinput_group.setToolTip("XInput is only available on Windows.")
+
+        buttons = QHBoxLayout()
+        ok_btn = QPushButton("Save")
+        cancel_btn = QPushButton("Cancel")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        buttons.addStretch(1)
+        buttons.addWidget(ok_btn)
+        buttons.addWidget(cancel_btn)
+
+        layout = QVBoxLayout()
+        layout.addWidget(keyboard_group)
+        layout.addWidget(xinput_group)
+        layout.addLayout(buttons)
+        self.setLayout(layout)
+        self.resize(420, 260)
+
+    def _populate_xinput_combo(self, combo: QComboBox) -> None:
+        combo.addItem("None", "")
+        for name in XINPUT_BUTTONS:
+            combo.addItem(name, name)
+
+    def _set_combo_value(self, combo: QComboBox, value: str) -> None:
+        index = combo.findData(value)
+        if index < 0:
+            index = 0
+        combo.setCurrentIndex(index)
+
+    def updated_settings(self) -> HotkeySettings:
+        return HotkeySettings(
+            start_hotkey=self.start_hotkey_edit.keySequence().toString(),
+            clock_hotkey=self.clock_hotkey_edit.keySequence().toString(),
+            start_xinput_button=str(self.start_xinput_combo.currentData() or ""),
+            clock_xinput_button=str(self.clock_xinput_combo.currentData() or ""),
         )
 
 
@@ -1624,6 +1804,7 @@ class CountdownWindow(QMainWindow):
 
         self._data_dir = os.path.dirname(__file__)
         self.settings = self._load_settings()
+        self.hotkey_settings = self._load_hotkey_settings()
         self.super_goal_seconds = self._load_super_goal_seconds()
         self._default_profile_files = {label: fname for label, fname in DEFAULT_PROFILES}
         self._custom_profiles = self._load_custom_profiles()
@@ -1667,6 +1848,15 @@ class CountdownWindow(QMainWindow):
         self._always_on_top = self.settings.always_on_top
         self._scale_factor = 1.0
         self._year_total_anim = None
+        self._start_shortcut = None
+        self._clock_shortcut = None
+        self._xinput_reader = XInputReader()
+        self._xinput_timer = QTimer(self)
+        self._xinput_timer.setInterval(50)
+        self._xinput_timer.timeout.connect(self._poll_xinput)
+        self._xinput_prev_buttons = 0
+        self._xinput_start_mask = 0
+        self._xinput_clock_mask = 0
 
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
@@ -1692,6 +1882,7 @@ class CountdownWindow(QMainWindow):
         self._goal_pulse_anim.valueChanged.connect(self._on_goal_pulse_value)
         self._goal_pulse_anim.finished.connect(self._on_goal_pulse_finished)
         self._apply_settings()
+        self._apply_hotkey_settings()
         if self._always_on_top:
             self._toggle_always_on_top(True, save=False)
 
@@ -1855,6 +2046,7 @@ class CountdownWindow(QMainWindow):
         reset_clock = QAction("Clock reset", self)
         reset_time = QAction("Reset Timer", self)
         settings = QAction("Settings", self)
+        hotkey_settings = QAction("Hotkey Settings", self)
         quit_action = QAction("Quit", self)
         set_time.triggered.connect(self._open_set_time)
         add_time.triggered.connect(self._open_add_time)
@@ -1866,6 +2058,7 @@ class CountdownWindow(QMainWindow):
         reset_clock.triggered.connect(self._reset_clock)
         reset_time.triggered.connect(self._reset_timer)
         settings.triggered.connect(self._open_settings)
+        hotkey_settings.triggered.connect(self._open_hotkey_settings)
         quit_action.triggered.connect(self._quit_app)
         visibility_menu = menu.addMenu("Show/Hide UI")
         self._add_visibility_action(
@@ -1912,6 +2105,7 @@ class CountdownWindow(QMainWindow):
         menu.addAction(reset_clock)
         menu.addAction(reset_time)
         menu.addAction(settings)
+        menu.addAction(hotkey_settings)
         menu.addSeparator()
         menu.addAction(quit_action)
         return menu
@@ -2054,6 +2248,18 @@ class CountdownWindow(QMainWindow):
         self._apply_settings()
         self._save_settings()
 
+    def _open_hotkey_settings(self) -> None:
+        dialog = HotkeySettingsDialog(
+            self,
+            HotkeySettings(**self.hotkey_settings.__dict__),
+            self._xinput_reader.available,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self.hotkey_settings = dialog.updated_settings()
+        self._apply_hotkey_settings()
+        self._save_hotkey_settings()
+
     def _quit_app(self) -> None:
         self.close()
 
@@ -2073,6 +2279,65 @@ class CountdownWindow(QMainWindow):
         self.clock_btn.set_state(False)
         self._update_total_today_label()
         self.status_label.setText("Timer reset")
+
+    def _apply_hotkey_settings(self) -> None:
+        self._start_shortcut = self._update_shortcut(
+            self._start_shortcut,
+            self.hotkey_settings.start_hotkey,
+            self._toggle_timer,
+        )
+        self._clock_shortcut = self._update_shortcut(
+            self._clock_shortcut,
+            self.hotkey_settings.clock_hotkey,
+            self._toggle_clock,
+        )
+        self._xinput_start_mask = XINPUT_BUTTONS.get(
+            self.hotkey_settings.start_xinput_button, 0
+        )
+        self._xinput_clock_mask = XINPUT_BUTTONS.get(
+            self.hotkey_settings.clock_xinput_button, 0
+        )
+        if (
+            self._xinput_reader.available
+            and (self._xinput_start_mask or self._xinput_clock_mask)
+        ):
+            if not self._xinput_timer.isActive():
+                self._xinput_prev_buttons = 0
+                self._xinput_timer.start()
+        else:
+            if self._xinput_timer.isActive():
+                self._xinput_timer.stop()
+            self._xinput_prev_buttons = 0
+
+    def _update_shortcut(
+        self,
+        shortcut: Optional[QShortcut],
+        sequence: str,
+        handler,
+    ) -> Optional[QShortcut]:
+        if not sequence:
+            if shortcut is not None:
+                shortcut.setEnabled(False)
+            return shortcut
+        if shortcut is None:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.activated.connect(handler)
+            return shortcut
+        shortcut.setKey(QKeySequence(sequence))
+        shortcut.setEnabled(True)
+        return shortcut
+
+    def _poll_xinput(self) -> None:
+        buttons = self._xinput_reader.read_buttons()
+        if buttons is None:
+            self._xinput_prev_buttons = 0
+            return
+        new_presses = buttons & ~self._xinput_prev_buttons
+        self._xinput_prev_buttons = buttons
+        if self._xinput_start_mask and (new_presses & self._xinput_start_mask):
+            self._toggle_timer()
+        if self._xinput_clock_mask and (new_presses & self._xinput_clock_mask):
+            self._toggle_clock()
 
     def _apply_settings(self) -> None:
         blur_radius = self.settings.blur_radius if self._blur_supported else 0
@@ -3097,6 +3362,25 @@ class CountdownWindow(QMainWindow):
         )
         return ui
 
+    def _load_hotkey_settings(self) -> HotkeySettings:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        hotkeys = HotkeySettings()
+        hotkeys.start_hotkey = str(
+            settings.value("hotkeys/start", hotkeys.start_hotkey) or ""
+        )
+        hotkeys.clock_hotkey = str(
+            settings.value("hotkeys/clock", hotkeys.clock_hotkey) or ""
+        )
+        hotkeys.start_xinput_button = str(
+            settings.value("xinput/start_button", hotkeys.start_xinput_button)
+            or ""
+        )
+        hotkeys.clock_xinput_button = str(
+            settings.value("xinput/clock_button", hotkeys.clock_xinput_button)
+            or ""
+        )
+        return hotkeys
+
     def _load_super_goal_seconds(self) -> int:
         settings = QSettings("settings.ini", QSettings.IniFormat)
         hours = int(settings.value("super_goal/hours", 2))
@@ -3547,6 +3831,18 @@ class CountdownWindow(QMainWindow):
         )
         settings.setValue(
             "ui/show_current_streak", int(self.settings.show_current_streak)
+        )
+        settings.sync()
+
+    def _save_hotkey_settings(self) -> None:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings.setValue("hotkeys/start", self.hotkey_settings.start_hotkey)
+        settings.setValue("hotkeys/clock", self.hotkey_settings.clock_hotkey)
+        settings.setValue(
+            "xinput/start_button", self.hotkey_settings.start_xinput_button
+        )
+        settings.setValue(
+            "xinput/clock_button", self.hotkey_settings.clock_xinput_button
         )
         settings.sync()
 
