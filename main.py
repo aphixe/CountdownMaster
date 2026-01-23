@@ -1643,6 +1643,7 @@ class CountdownWindow(QMainWindow):
         self.timer_active = False
         self.clock_active = False
         self.clock_elapsed_seconds = 0
+        self._clock_offset_seconds = 0
         self._acrylic_enabled = sys.platform == "win32"
         self._is_macos = sys.platform == "darwin"
         self._mac_blur_supported = self._is_macos and QMacVisualEffect is not None
@@ -1851,6 +1852,7 @@ class CountdownWindow(QMainWindow):
         always_on_top = QAction("Always On Top", self)
         always_on_top.setCheckable(True)
         always_on_top.setChecked(self._always_on_top)
+        reset_clock = QAction("Clock reset", self)
         reset_time = QAction("Reset Timer", self)
         settings = QAction("Settings", self)
         quit_action = QAction("Quit", self)
@@ -1861,6 +1863,7 @@ class CountdownWindow(QMainWindow):
         logs.triggered.connect(self._open_logs)
         trends_graph.triggered.connect(self._open_trends_graph)
         always_on_top.toggled.connect(self._toggle_always_on_top)
+        reset_clock.triggered.connect(self._reset_clock)
         reset_time.triggered.connect(self._reset_timer)
         settings.triggered.connect(self._open_settings)
         quit_action.triggered.connect(self._quit_app)
@@ -1906,6 +1909,7 @@ class CountdownWindow(QMainWindow):
         menu.addAction(logs)
         menu.addAction(trends_graph)
         menu.addAction(always_on_top)
+        menu.addAction(reset_clock)
         menu.addAction(reset_time)
         menu.addAction(settings)
         menu.addSeparator()
@@ -2061,6 +2065,7 @@ class CountdownWindow(QMainWindow):
         self._finalize_session()
         self.remaining_seconds = 0
         self.clock_elapsed_seconds = 0
+        self._clock_offset_seconds = 0
         self._update_timer_label()
         self.toggle_btn.setText("Start")
         self.toggle_btn.set_state(False)
@@ -2336,7 +2341,7 @@ class CountdownWindow(QMainWindow):
             return
         if self.timer_active:
             self._stop_countdown("Paused")
-        self.clock_elapsed_seconds = 0
+        self.clock_elapsed_seconds = self._clock_display_seconds()
         self._update_timer_label(self.clock_elapsed_seconds)
         self.timer.start()
         self.timer_active = False
@@ -2368,10 +2373,18 @@ class CountdownWindow(QMainWindow):
         self.clock_btn.set_state(False)
         self.status_label.setText(status_text)
 
+    def _reset_clock(self) -> None:
+        today_key = self._date_key(QDate.currentDate())
+        self._clock_offset_seconds = self._total_seconds_for_day(today_key)
+        self.clock_elapsed_seconds = 0
+        if self.clock_active or not self.timer_active:
+            self._update_timer_label(self.clock_elapsed_seconds)
+        self.status_label.setText("Clock reset")
+
     def _tick(self) -> None:
         if self.clock_active:
-            self.clock_elapsed_seconds += 1
             self._record_super_goal_progress(1)
+            self.clock_elapsed_seconds = self._clock_display_seconds()
             self._update_timer_label(self.clock_elapsed_seconds)
             return
         if self.remaining_seconds <= 0:
@@ -2800,6 +2813,11 @@ class CountdownWindow(QMainWindow):
             total += self._active_session_seconds
         return total
 
+    def _clock_display_seconds(self) -> int:
+        today_key = self._date_key(QDate.currentDate())
+        total_seconds = self._total_seconds_for_day(today_key)
+        return max(0, total_seconds - self._clock_offset_seconds)
+
     def _goal_met_on_date(self, date_key: str) -> bool:
         goal_seconds = self.daily_goals.get(date_key, 0)
         if goal_seconds <= 0:
@@ -2861,6 +2879,7 @@ class CountdownWindow(QMainWindow):
         if self._active_session_date_key != current_key:
             self._finalize_session()
             self._begin_session()
+            self._clock_offset_seconds = 0
         if current_date.year() != self._heatmap_year:
             self._refresh_heatmap()
         self._active_session_seconds += seconds
@@ -3393,6 +3412,7 @@ class CountdownWindow(QMainWindow):
         self._active_session_start = None
         self._active_session_seconds = 0
         self._active_session_date_key = None
+        self._clock_offset_seconds = 0
         (
             self.log_entries,
             self.daily_totals,
