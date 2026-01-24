@@ -39,6 +39,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
@@ -132,6 +133,15 @@ class HotkeySettings:
     clock_hotkey: str = ""
     start_xinput_button: str = ""
     clock_xinput_button: str = ""
+
+
+@dataclass(frozen=True)
+class GraphSeries:
+    label: str
+    totals: dict[str, int]
+    line_color: QColor
+    dot_color: QColor
+    fill_color: QColor
 
 
 XINPUT_BUTTONS = {
@@ -279,6 +289,16 @@ DEFAULT_PROFILES = (
 DEFAULT_PROFILE_NAME = "Activate Immersion"
 PROFILE_ACTION_ADD = "__add_profile__"
 PROFILE_ACTION_DELETE = "__delete_profile__"
+PROFILE_COLOR_PALETTE = (
+    "#38bdf8",
+    "#f472b6",
+    "#22c55e",
+    "#f59e0b",
+    "#ef4444",
+    "#a855f7",
+    "#14b8a6",
+    "#eab308",
+)
 
 
 def setup_logging(log_path: str) -> None:
@@ -951,6 +971,98 @@ class SettingsDialog(QDialog):
         )
 
 
+class ProfileEditorDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        profile_labels: list[str],
+        active_profile: str,
+        resolved_colors: dict[str, QColor],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Profile Editor")
+        self.setModal(True)
+        self._colors = {
+            label: QColor(resolved_colors.get(label, QColor()))
+            for label in profile_labels
+        }
+        self._initial_colors = {
+            label: qcolor_to_hex(color) for label, color in self._colors.items()
+        }
+
+        self.profile_combo = QComboBox()
+        for label in profile_labels:
+            self.profile_combo.addItem(label, label)
+        active_index = self.profile_combo.findData(active_profile)
+        if active_index >= 0:
+            self.profile_combo.setCurrentIndex(active_index)
+
+        self.color_btn = QPushButton()
+        self.color_btn.clicked.connect(self._pick_color)
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+        self._sync_color_button()
+
+        form = QFormLayout()
+        form.addRow("Profile", self.profile_combo)
+        form.addRow("Color", self.color_btn)
+
+        buttons = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        cancel_btn = QPushButton("Cancel")
+        save_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        buttons.addStretch(1)
+        buttons.addWidget(save_btn)
+        buttons.addWidget(cancel_btn)
+
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addLayout(buttons)
+        self.setLayout(layout)
+        self.resize(360, 160)
+
+    def _current_label(self) -> Optional[str]:
+        data = self.profile_combo.currentData()
+        if isinstance(data, str) and data:
+            return data
+        return None
+
+    def _current_color(self) -> QColor:
+        label = self._current_label()
+        if label and label in self._colors:
+            return self._colors[label]
+        return QColor()
+
+    def _sync_color_button(self) -> None:
+        color = self._current_color()
+        self.color_btn.setText(color.name())
+        self.color_btn.setStyleSheet(
+            f"background-color: {color.name()};"
+            "color: #111; padding: 6px; border-radius: 6px;"
+        )
+
+    def _on_profile_changed(self, index: int) -> None:
+        self._sync_color_button()
+
+    def _pick_color(self) -> None:
+        current = self._current_color()
+        color = QColorDialog.getColor(current, self)
+        if not color.isValid():
+            return
+        label = self._current_label()
+        if not label:
+            return
+        self._colors[label] = color
+        self._sync_color_button()
+
+    def changed_colors(self) -> dict[str, QColor]:
+        changed: dict[str, QColor] = {}
+        for label, color in self._colors.items():
+            if qcolor_to_hex(color) != self._initial_colors.get(label):
+                changed[label] = color
+        return changed
+
+
 class HotkeySettingsDialog(QDialog):
     def __init__(
         self,
@@ -1264,17 +1376,20 @@ class GlowFrame(QFrame):
 class TrendsGraphWidget(QWidget):
     def __init__(
         self,
-        daily_totals: dict[str, int],
+        series: list[GraphSeries],
         ui_settings: UiSettings,
+        active_label: str,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self._daily_totals = daily_totals
+        self._series = list(series)
         self._settings = ui_settings
+        self._active_label = active_label
+        self._enabled_labels = {entry.label for entry in self._series}
         self._scale = "week"
         self._range_days = 7
-        self._points: list[QPointF] = []
-        self._values: list[int] = []
+        self._points_by_series: dict[str, list[QPointF]] = {}
+        self._values_by_series: dict[str, list[int]] = {}
         self._dates: list[QDate] = []
         self._hover_index: Optional[int] = None
         self._point_count = 7
@@ -1295,29 +1410,54 @@ class TrendsGraphWidget(QWidget):
     def point_count(self) -> int:
         return self._point_count
 
-    def _value_for_date(self, date: QDate) -> int:
-        value = self._daily_totals.get(date.toString("yyyy-MM-dd"), 0)
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 0
+    def set_enabled_labels(self, labels: set[str]) -> None:
+        self._enabled_labels = set(labels)
+        self.update()
 
-    def _build_daily_series(
-        self, days: int
-    ) -> tuple[list[QDate], list[int]]:
+    def _visible_series(self) -> list[GraphSeries]:
+        if not self._enabled_labels:
+            return []
+        return [s for s in self._series if s.label in self._enabled_labels]
+
+    def _series_order(self) -> list[GraphSeries]:
+        series = self._visible_series()
+        if not series or not self._active_label:
+            return list(series)
+        active = [s for s in series if s.label == self._active_label]
+        rest = [s for s in series if s.label != self._active_label]
+        return rest + active if active else list(series)
+
+    def _build_daily_dates(self, days: int) -> list[QDate]:
         end = QDate.currentDate()
         start = end.addDays(-(days - 1))
         dates: list[QDate] = []
-        values: list[int] = []
         for offset in range(days):
             date = start.addDays(offset)
             dates.append(date)
-            values.append(self._value_for_date(date))
-        return dates, values
+        return dates
 
-    def _build_month_series(self) -> tuple[list[QDate], list[int]]:
+    def _values_for_dates(
+        self, totals: dict[str, int], dates: list[QDate]
+    ) -> list[int]:
+        values: list[int] = []
+        for date in dates:
+            value = totals.get(date.toString("yyyy-MM-dd"), 0)
+            try:
+                values.append(int(value))
+            except (TypeError, ValueError):
+                values.append(0)
+        return values
+
+    def _build_month_dates(self) -> list[QDate]:
+        end = QDate.currentDate()
+        start = QDate(end.year(), end.month(), 1).addMonths(-11)
+        return [start.addMonths(offset) for offset in range(12)]
+
+    def _values_for_months(
+        self, totals: dict[str, int], dates: list[QDate]
+    ) -> list[int]:
         monthly_totals: dict[tuple[int, int], int] = {}
-        for date_key, value in self._daily_totals.items():
+        for date_key, value in totals.items():
             date = QDate.fromString(date_key, "yyyy-MM-dd")
             if not date.isValid():
                 continue
@@ -1327,23 +1467,21 @@ class TrendsGraphWidget(QWidget):
                 continue
             key = (date.year(), date.month())
             monthly_totals[key] = monthly_totals.get(key, 0) + seconds
-        end = QDate.currentDate()
-        start = QDate(end.year(), end.month(), 1).addMonths(-11)
-        dates: list[QDate] = []
         values: list[int] = []
-        for offset in range(12):
-            date = start.addMonths(offset)
-            dates.append(date)
-            values.append(
-                monthly_totals.get((date.year(), date.month()), 0)
-            )
-        return dates, values
+        for date in dates:
+            values.append(monthly_totals.get((date.year(), date.month()), 0))
+        return values
 
     def _label_indices(self, count: int, show_all: bool) -> range:
         if show_all or count <= 7:
             return range(count)
         step = max(1, int(math.ceil(count / 7)))
         return range(0, count, step)
+
+    def _tooltip_date_label(self, date: QDate) -> str:
+        if self._scale == "year":
+            return date.toString("MMM yyyy")
+        return date.toString("yyyy-MM-dd")
 
     def _format_duration(self, seconds: int) -> str:
         seconds = max(0, int(seconds))
@@ -1352,19 +1490,54 @@ class TrendsGraphWidget(QWidget):
         secs = seconds % 60
         return f"{hours} hours {minutes} min {secs} sec"
 
+    def _tooltip_text(self, index: int) -> str:
+        if index < 0 or index >= len(self._dates):
+            return ""
+        date = self._dates[index]
+        lines = [f"Date: {self._tooltip_date_label(date)}"]
+        entries: list[str] = []
+        for series in self._series_order():
+            values = self._values_by_series.get(series.label, [])
+            seconds = values[index] if index < len(values) else 0
+            if seconds <= 0:
+                continue
+            entries.append(f"{series.label}: {self._format_duration(seconds)}")
+        if not entries:
+            entries.append("No activity")
+        lines.extend(entries)
+        return "\n".join(lines)
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
         if self._scale == "year":
-            dates, values = self._build_month_series()
+            dates = self._build_month_dates()
         else:
-            dates, values = self._build_daily_series(self._range_days)
+            dates = self._build_daily_dates(self._range_days)
 
         if not dates:
             return
+        visible_series = self._visible_series()
+        if not visible_series:
+            self._points_by_series = {}
+            self._values_by_series = {}
+            self._dates = dates
+            painter.setPen(self._settings.text_color)
+            painter.drawText(self.rect(), Qt.AlignCenter, "No profiles selected")
+            return
 
-        max_value = max(values) if values else 0
+        values_by_series: dict[str, list[int]] = {}
+        max_value = 0
+        for series in visible_series:
+            if self._scale == "year":
+                values = self._values_for_months(series.totals, dates)
+            else:
+                values = self._values_for_dates(series.totals, dates)
+            values_by_series[series.label] = values
+            if values:
+                max_value = max(max_value, max(values))
+
         scale_limit_seconds = (
             (self._settings.day_end_hour * 3600)
             + (self._settings.day_end_minute * 60)
@@ -1384,8 +1557,8 @@ class TrendsGraphWidget(QWidget):
         if plot_rect.width() <= 0 or plot_rect.height() <= 0:
             return
 
-        self._points = []
-        self._values = values
+        self._points_by_series = {}
+        self._values_by_series = values_by_series
         self._dates = dates
 
         if max_value <= 0:
@@ -1395,21 +1568,24 @@ class TrendsGraphWidget(QWidget):
         if scale_seconds <= 0:
             scale_seconds = max_value
 
-        points: list[QPointF] = []
-        count = len(values)
+        count = len(dates)
         step_x = (
             plot_rect.width() / (count - 1)
             if count > 1
             else 0
         )
-        for idx, value in enumerate(values):
-            clamped_value = min(value, scale_seconds)
-            ratio = clamped_value / scale_seconds if scale_seconds > 0 else 0
-            x = plot_rect.left() + (step_x * idx)
-            y = plot_rect.bottom() - (ratio * plot_rect.height())
-            points.append(QPointF(x, y))
-
-        self._points = points
+        for series in visible_series:
+            values = values_by_series.get(series.label, [])
+            points: list[QPointF] = []
+            for idx, value in enumerate(values):
+                clamped_value = min(value, scale_seconds)
+                ratio = (
+                    clamped_value / scale_seconds if scale_seconds > 0 else 0
+                )
+                x = plot_rect.left() + (step_x * idx)
+                y = plot_rect.bottom() - (ratio * plot_rect.height())
+                points.append(QPointF(x, y))
+            self._points_by_series[series.label] = points
 
         max_hours = int(scale_seconds // 3600) if scale_seconds > 0 else 0
         if max_hours == 0:
@@ -1463,38 +1639,71 @@ class TrendsGraphWidget(QWidget):
         painter.setPen(QPen(axis_color, 1.2))
         painter.drawLine(plot_rect.bottomLeft(), plot_rect.bottomRight())
 
-        if len(points) > 1:
-            path = QPainterPath(points[0])
-            for idx in range(1, len(points)):
-                path.lineTo(points[idx])
+        ordered_series = self._series_order()
+        for series in ordered_series:
+            values = values_by_series.get(series.label, [])
+            points = self._points_by_series.get(series.label, [])
+            if not points or (values and max(values) <= 0):
+                continue
+            if len(points) > 1:
+                path = QPainterPath(points[0])
+                for idx in range(1, len(points)):
+                    path.lineTo(points[idx])
 
-            fill_path = QPainterPath(path)
-            fill_path.lineTo(points[-1].x(), plot_rect.bottom())
-            fill_path.lineTo(points[0].x(), plot_rect.bottom())
-            fill_path.closeSubpath()
+                fill_path = QPainterPath(path)
+                fill_path.lineTo(points[-1].x(), plot_rect.bottom())
+                fill_path.lineTo(points[0].x(), plot_rect.bottom())
+                fill_path.closeSubpath()
 
-            gradient = QLinearGradient(
-                0, plot_rect.top(), 0, plot_rect.bottom()
+                gradient = QLinearGradient(
+                    0, plot_rect.top(), 0, plot_rect.bottom()
+                )
+                fill_top = QColor(series.fill_color)
+                fill_bottom = QColor(series.fill_color)
+                fill_top.setAlpha(
+                    100 if series.label == self._active_label else 70
+                )
+                fill_bottom.setAlpha(0)
+                gradient.setColorAt(0, fill_top)
+                gradient.setColorAt(1, fill_bottom)
+                painter.fillPath(fill_path, gradient)
+
+        for series in ordered_series:
+            values = values_by_series.get(series.label, [])
+            points = self._points_by_series.get(series.label, [])
+            if not points or (values and max(values) <= 0):
+                continue
+            if len(points) > 1:
+                pen_color = QColor(series.line_color)
+                pen_color.setAlpha(
+                    230 if series.label == self._active_label else 180
+                )
+                pen = QPen(
+                    pen_color,
+                    2.6 if series.label == self._active_label else 2.0,
+                )
+                pen.setCapStyle(Qt.RoundCap)
+                pen.setJoinStyle(Qt.RoundJoin)
+                painter.setPen(pen)
+                path = QPainterPath(points[0])
+                for idx in range(1, len(points)):
+                    path.lineTo(points[idx])
+                painter.drawPath(path)
+
+        for series in ordered_series:
+            values = values_by_series.get(series.label, [])
+            points = self._points_by_series.get(series.label, [])
+            if not points or (values and max(values) <= 0):
+                continue
+            dot_color = QColor(series.dot_color)
+            dot_color.setAlpha(
+                230 if series.label == self._active_label else 180
             )
-            fill_top = QColor(self._settings.graph_fill_color)
-            fill_top.setAlpha(160)
-            fill_bottom = QColor(self._settings.graph_fill_color)
-            fill_bottom.setAlpha(0)
-            gradient.setColorAt(0, fill_top)
-            gradient.setColorAt(1, fill_bottom)
-            painter.fillPath(fill_path, gradient)
-
-            pen = QPen(self._settings.graph_line_color, 2.5)
-            pen.setCapStyle(Qt.RoundCap)
-            pen.setJoinStyle(Qt.RoundJoin)
-            painter.setPen(pen)
-            painter.drawPath(path)
-
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(self._settings.graph_dot_color)
-        dot_radius = self._dot_radius
-        for point in points:
-            painter.drawEllipse(point, dot_radius, dot_radius)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(dot_color)
+            dot_radius = self._dot_radius if series.label == self._active_label else 3
+            for point in points:
+                painter.drawEllipse(point, dot_radius, dot_radius)
 
         if self._scale == "year":
             labels = [date.toString("MMM") for date in dates]
@@ -1511,28 +1720,34 @@ class TrendsGraphWidget(QWidget):
         painter.setPen(label_color)
         metrics = painter.fontMetrics()
         label_y = self.rect().bottom() - 12
+        label_points = None
+        if self._active_label in self._points_by_series:
+            label_points = self._points_by_series[self._active_label]
+        elif self._points_by_series:
+            label_points = next(iter(self._points_by_series.values()))
         for idx in indices:
-            if idx >= len(points):
+            if label_points is None or idx >= len(label_points):
                 continue
             text = labels[idx]
             text_width = metrics.horizontalAdvance(text)
-            x = points[idx].x() - (text_width / 2)
+            x = label_points[idx].x() - (text_width / 2)
             painter.drawText(int(x), int(label_y), text)
 
     def mouseMoveEvent(self, event) -> None:
-        if not self._points:
+        if not self._points_by_series:
             QToolTip.hideText()
             self._hover_index = None
             return
         closest_index = None
         closest_dist = None
-        for idx, point in enumerate(self._points):
-            dist = (point.x() - event.position().x()) ** 2 + (
-                point.y() - event.position().y()
-            ) ** 2
-            if closest_dist is None or dist < closest_dist:
-                closest_dist = dist
-                closest_index = idx
+        for points in self._points_by_series.values():
+            for idx, point in enumerate(points):
+                dist = (point.x() - event.position().x()) ** 2 + (
+                    point.y() - event.position().y()
+                ) ** 2
+                if closest_dist is None or dist < closest_dist:
+                    closest_dist = dist
+                    closest_index = idx
         hit_radius = (self._dot_radius + 4) ** 2
         if closest_index is None or closest_dist is None or closest_dist > hit_radius:
             if self._hover_index is not None:
@@ -1542,10 +1757,9 @@ class TrendsGraphWidget(QWidget):
         if self._hover_index == closest_index:
             return
         self._hover_index = closest_index
-        seconds = self._values[closest_index] if closest_index < len(self._values) else 0
         QToolTip.showText(
             event.globalPos(),
-            self._format_duration(seconds),
+            self._tooltip_text(closest_index),
             self,
         )
 
@@ -1559,15 +1773,18 @@ class GraphDialog(QDialog):
     def __init__(
         self,
         parent: QWidget,
-        daily_totals: dict[str, int],
+        series: list[GraphSeries],
         ui_settings: UiSettings,
+        active_label: str,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Trends Graph")
         self.setModal(True)
         self._settings = ui_settings
+        self._series = list(series)
+        self._legend_checks: dict[str, QCheckBox] = {}
 
-        self.graph = TrendsGraphWidget(daily_totals, ui_settings)
+        self.graph = TrendsGraphWidget(self._series, ui_settings, active_label)
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidget(self.graph)
@@ -1607,6 +1824,35 @@ class GraphDialog(QDialog):
         controls.addWidget(self.range_combo)
         controls.addStretch(1)
 
+        legend_group = QGroupBox("Legend")
+        legend_layout = QGridLayout()
+        columns = 3
+        for idx, entry in enumerate(self._series):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            swatch = QFrame()
+            swatch.setFixedSize(12, 12)
+            swatch.setStyleSheet(
+                f"background-color: {qcolor_to_hex(entry.line_color)};"
+                "border-radius: 2px;"
+            )
+            checkbox = QCheckBox(entry.label)
+            checkbox.setChecked(True)
+            checkbox.stateChanged.connect(self._sync_series_filter)
+            row.addWidget(swatch)
+            row.addWidget(checkbox)
+            row.addStretch(1)
+            row_widget = QWidget()
+            row_widget.setLayout(row)
+            grid_row = idx // columns
+            grid_col = idx % columns
+            legend_layout.addWidget(row_widget, grid_row, grid_col)
+            self._legend_checks[entry.label] = checkbox
+        for col in range(columns):
+            legend_layout.setColumnStretch(col, 1)
+        legend_group.setLayout(legend_layout)
+
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
 
@@ -1616,10 +1862,12 @@ class GraphDialog(QDialog):
 
         layout = QVBoxLayout()
         layout.addLayout(controls)
+        layout.addWidget(legend_group)
         layout.addWidget(self.scroll_area)
         layout.addLayout(footer)
         self.setLayout(layout)
 
+        self._sync_series_filter()
         self._sync_graph()
 
     def _sync_graph(self) -> None:
@@ -1638,6 +1886,14 @@ class GraphDialog(QDialog):
             self.range_combo.setEnabled(True)
         self.graph.set_scale(scale, range_days)
         self._update_graph_width()
+
+    def _sync_series_filter(self) -> None:
+        enabled = {
+            label
+            for label, checkbox in self._legend_checks.items()
+            if checkbox.isChecked()
+        }
+        self.graph.set_enabled_labels(enabled)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -1809,6 +2065,7 @@ class CountdownWindow(QMainWindow):
         self._default_profile_files = {label: fname for label, fname in DEFAULT_PROFILES}
         self._custom_profiles = self._load_custom_profiles()
         self._active_profile = self._load_active_profile()
+        self._profile_colors = self._load_profile_colors()
         self._data_file_path = self._profile_file_path(self._active_profile)
         (
             self.log_entries,
@@ -2040,6 +2297,7 @@ class CountdownWindow(QMainWindow):
         set_super_goal = QAction("Set Daily Super Goal", self)
         logs = QAction("Logs", self)
         trends_graph = QAction("Trends Graph", self)
+        profile_editor = QAction("Profile Editor", self)
         always_on_top = QAction("Always On Top", self)
         always_on_top.setCheckable(True)
         always_on_top.setChecked(self._always_on_top)
@@ -2054,6 +2312,7 @@ class CountdownWindow(QMainWindow):
         set_super_goal.triggered.connect(self._open_set_super_goal)
         logs.triggered.connect(self._open_logs)
         trends_graph.triggered.connect(self._open_trends_graph)
+        profile_editor.triggered.connect(self._open_profile_editor)
         always_on_top.toggled.connect(self._toggle_always_on_top)
         reset_clock.triggered.connect(self._reset_clock)
         reset_time.triggered.connect(self._reset_timer)
@@ -2101,6 +2360,7 @@ class CountdownWindow(QMainWindow):
         menu.addAction(set_super_goal)
         menu.addAction(logs)
         menu.addAction(trends_graph)
+        menu.addAction(profile_editor)
         menu.addAction(always_on_top)
         menu.addAction(reset_clock)
         menu.addAction(reset_time)
@@ -2234,9 +2494,50 @@ class CountdownWindow(QMainWindow):
         )
         dialog.exec()
 
+    def _graph_series(self) -> list[GraphSeries]:
+        series: list[GraphSeries] = []
+        for label in self._profile_labels():
+            if label == self._active_profile:
+                totals = dict(self.daily_totals)
+            else:
+                _, totals, _ = self._load_log_entries_from_path(
+                    self._profile_file_path(label)
+                )
+            series.append(
+                GraphSeries(
+                    label=label,
+                    totals=totals,
+                    line_color=self._profile_color(label),
+                    dot_color=self._profile_dot_color(label),
+                    fill_color=self._profile_fill_color(label),
+                )
+            )
+        return series
+
     def _open_trends_graph(self) -> None:
-        dialog = GraphDialog(self, self.daily_totals, self.settings)
+        dialog = GraphDialog(
+            self, self._graph_series(), self.settings, self._active_profile
+        )
         dialog.exec()
+
+    def _open_profile_editor(self) -> None:
+        labels = self._profile_labels()
+        if not labels:
+            self.status_label.setText("No profiles found")
+            return
+        resolved = {label: self._profile_color(label) for label in labels}
+        dialog = ProfileEditorDialog(self, labels, self._active_profile, resolved)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        changed = dialog.changed_colors()
+        if not changed:
+            return
+        for label, color in changed.items():
+            fallback = self._profile_fallback_color(label)
+            if qcolor_to_hex(color) == qcolor_to_hex(fallback):
+                self._clear_profile_color(label)
+            else:
+                self._set_profile_color(label, color)
 
     def _open_settings(self) -> None:
         dialog = SettingsDialog(
@@ -3387,26 +3688,30 @@ class CountdownWindow(QMainWindow):
         minutes = int(settings.value("super_goal/minutes", 0))
         return hours * 3600 + minutes * 60
 
-    def _ensure_data_file(self) -> None:
-        if not os.path.exists(self._data_file_path) or os.path.getsize(
-            self._data_file_path
-        ) == 0:
-            with open(
-                self._data_file_path, "w", newline="", encoding="utf-8"
-            ) as handle:
+    def _ensure_data_file_path(self, path: str) -> None:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            with open(path, "w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
                 writer.writerow(
                     ["date", "start_time", "end_time", "duration_seconds", "goal_seconds"]
                 )
 
+    def _ensure_data_file(self) -> None:
+        self._ensure_data_file_path(self._data_file_path)
+
     def _load_log_entries(
         self,
     ) -> tuple[list[dict[str, object]], dict[str, int], dict[str, int]]:
-        self._ensure_data_file()
+        return self._load_log_entries_from_path(self._data_file_path)
+
+    def _load_log_entries_from_path(
+        self, path: str
+    ) -> tuple[list[dict[str, object]], dict[str, int], dict[str, int]]:
+        self._ensure_data_file_path(path)
         entries: list[dict[str, object]] = []
         totals: dict[str, int] = {}
         daily_goals: dict[str, int] = {}
-        with open(self._data_file_path, newline="", encoding="utf-8") as handle:
+        with open(path, newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             if reader.fieldnames is None:
                 return entries, totals, daily_goals
@@ -3460,8 +3765,70 @@ class CountdownWindow(QMainWindow):
                 )
                 totals[date_key] = totals.get(date_key, 0) + duration
         if needs_migration:
-            self._rewrite_log_file(entries, daily_goals)
+            self._rewrite_log_file(entries, daily_goals, path=path)
         return entries, totals, daily_goals
+
+    def _profile_color_key(self, label: str) -> str:
+        return f"profiles/colors/{label.strip().lower()}"
+
+    def _palette_profile_color(self, label: str) -> QColor:
+        if not PROFILE_COLOR_PALETTE:
+            return QColor("#6dd3fb")
+        seed = sum(ord(ch) for ch in label.strip().lower())
+        return QColor(PROFILE_COLOR_PALETTE[seed % len(PROFILE_COLOR_PALETTE)])
+
+    def _profile_fallback_color(self, label: str) -> QColor:
+        if label == self._active_profile:
+            return QColor(self.settings.graph_line_color)
+        return self._palette_profile_color(label)
+
+    def _profile_color(self, label: str) -> QColor:
+        color = self._profile_colors.get(label)
+        if isinstance(color, QColor) and color.isValid():
+            return QColor(color)
+        return self._profile_fallback_color(label)
+
+    def _profile_dot_color(self, label: str) -> QColor:
+        color = self._profile_colors.get(label)
+        if isinstance(color, QColor) and color.isValid():
+            return QColor(color)
+        if label == self._active_profile:
+            return QColor(self.settings.graph_dot_color)
+        return self._palette_profile_color(label)
+
+    def _profile_fill_color(self, label: str) -> QColor:
+        color = self._profile_colors.get(label)
+        if isinstance(color, QColor) and color.isValid():
+            return QColor(color)
+        if label == self._active_profile:
+            return QColor(self.settings.graph_fill_color)
+        return self._palette_profile_color(label)
+
+    def _load_profile_colors(self) -> dict[str, QColor]:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        colors: dict[str, QColor] = {}
+        for label in self._profile_labels():
+            key = self._profile_color_key(label)
+            value = settings.value(key, "")
+            if isinstance(value, str) and value:
+                color = QColor(value)
+                if color.isValid():
+                    colors[label] = color
+        return colors
+
+    def _set_profile_color(self, label: str, color: QColor) -> None:
+        if not color.isValid():
+            return
+        self._profile_colors[label] = color
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings.setValue(self._profile_color_key(label), qcolor_to_hex(color))
+        settings.sync()
+
+    def _clear_profile_color(self, label: str) -> None:
+        self._profile_colors.pop(label, None)
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings.remove(self._profile_color_key(label))
+        settings.sync()
 
     def _compute_end_time(self, start_time: str, duration: int) -> str:
         time = QTime.fromString(start_time, "HH:mm:ss")
@@ -3488,9 +3855,14 @@ class CountdownWindow(QMainWindow):
         self._append_log_entry(date_key, "goal", "goal", 0, goal_seconds)
 
     def _rewrite_log_file(
-        self, entries: list[dict[str, object]], daily_goals: dict[str, int]
+        self,
+        entries: list[dict[str, object]],
+        daily_goals: dict[str, int],
+        *,
+        path: Optional[str] = None,
     ) -> None:
-        with open(self._data_file_path, "w", newline="", encoding="utf-8") as handle:
+        target_path = path or self._data_file_path
+        with open(target_path, "w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(
                 ["date", "start_time", "end_time", "duration_seconds", "goal_seconds"]
@@ -3675,6 +4047,7 @@ class CountdownWindow(QMainWindow):
                 os.remove(path)
             except OSError:
                 LOGGER.exception("Failed to delete profile file")
+        self._clear_profile_color(label)
         if was_active:
             self._active_profile = DEFAULT_PROFILE_NAME
         self._save_profile_settings()
