@@ -2057,12 +2057,15 @@ class CountdownWindow(QMainWindow):
         self._data_dir = os.path.dirname(__file__)
         self.settings = self._load_settings()
         self.hotkey_settings = self._load_hotkey_settings()
-        self.super_goal_seconds = self._load_super_goal_seconds()
         self._default_profile_files = {label: fname for label, fname in DEFAULT_PROFILES}
         self._custom_profiles = self._load_custom_profiles()
         self._active_profile = self._load_active_profile()
         self._profile_colors = self._load_profile_colors()
+        self.super_goal_seconds = self._load_profile_super_goal_seconds(
+            self._active_profile
+        )
         self._data_file_path = self._profile_file_path(self._active_profile)
+        self._migrate_profile_logs()
         (
             self.log_entries,
             self.daily_totals,
@@ -2496,8 +2499,10 @@ class CountdownWindow(QMainWindow):
             if label == self._active_profile:
                 totals = dict(self.daily_totals)
             else:
+                goal_seconds = self._load_profile_super_goal_seconds(label)
                 _, totals, _ = self._load_log_entries_from_path(
-                    self._profile_file_path(label)
+                    self._profile_file_path(label),
+                    fallback_goal_seconds=goal_seconds,
                 )
             series.append(
                 GraphSeries(
@@ -3678,11 +3683,63 @@ class CountdownWindow(QMainWindow):
         )
         return hotkeys
 
-    def _load_super_goal_seconds(self) -> int:
+    def _legacy_super_goal_seconds(
+        self, settings: Optional[QSettings] = None
+    ) -> int:
+        if settings is None:
+            settings = QSettings("settings.ini", QSettings.IniFormat)
+        hours = self._read_int_setting(settings, "super_goal/hours", 2) or 0
+        minutes = self._read_int_setting(settings, "super_goal/minutes", 0) or 0
+        return max(0, hours * 3600 + minutes * 60)
+
+    def _profile_super_goal_key(self, label: str) -> str:
+        clean = label.strip().lower()
+        if not clean:
+            return "default"
+        for sep in ("/", "\\", ":"):
+            clean = clean.replace(sep, "_")
+        return clean
+
+    def _profile_super_goal_settings_base(self, label: str) -> str:
+        return f"super_goal/profiles/{self._profile_super_goal_key(label)}"
+
+    def _load_profile_super_goal_seconds(self, label: str) -> int:
         settings = QSettings("settings.ini", QSettings.IniFormat)
-        hours = int(settings.value("super_goal/hours", 2))
-        minutes = int(settings.value("super_goal/minutes", 0))
-        return hours * 3600 + minutes * 60
+        base = self._profile_super_goal_settings_base(label)
+        hours_key = f"{base}/hours"
+        minutes_key = f"{base}/minutes"
+        if settings.contains(hours_key) or settings.contains(minutes_key):
+            hours = self._read_int_setting(settings, hours_key, 0) or 0
+            minutes = self._read_int_setting(settings, minutes_key, 0) or 0
+            return max(0, hours * 3600 + minutes * 60)
+        legacy = self._legacy_super_goal_seconds(settings)
+        self._save_profile_super_goal_seconds(
+            label, legacy, settings=settings, sync=False
+        )
+        settings.sync()
+        return legacy
+
+    def _save_profile_super_goal_seconds(
+        self,
+        label: str,
+        seconds: int,
+        *,
+        settings: Optional[QSettings] = None,
+        sync: bool = True,
+    ) -> None:
+        if settings is None:
+            settings = QSettings("settings.ini", QSettings.IniFormat)
+        total = max(0, int(seconds))
+        base = self._profile_super_goal_settings_base(label)
+        settings.setValue(f"{base}/hours", total // 3600)
+        settings.setValue(f"{base}/minutes", (total % 3600) // 60)
+        if sync:
+            settings.sync()
+
+    def _clear_profile_super_goal(self, label: str) -> None:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings.remove(self._profile_super_goal_settings_base(label))
+        settings.sync()
 
     def _ensure_data_file_path(self, path: str) -> None:
         if not os.path.exists(path) or os.path.getsize(path) == 0:
@@ -3695,13 +3752,21 @@ class CountdownWindow(QMainWindow):
     def _ensure_data_file(self) -> None:
         self._ensure_data_file_path(self._data_file_path)
 
+    def _migrate_profile_logs(self) -> None:
+        for label in self._profile_labels():
+            fallback_goal = self._load_profile_super_goal_seconds(label)
+            self._load_log_entries_from_path(
+                self._profile_file_path(label),
+                fallback_goal_seconds=fallback_goal,
+            )
+
     def _load_log_entries(
         self,
     ) -> tuple[list[dict[str, object]], dict[str, int], dict[str, int]]:
         return self._load_log_entries_from_path(self._data_file_path)
 
     def _load_log_entries_from_path(
-        self, path: str
+        self, path: str, *, fallback_goal_seconds: Optional[int] = None
     ) -> tuple[list[dict[str, object]], dict[str, int], dict[str, int]]:
         self._ensure_data_file_path(path)
         entries: list[dict[str, object]] = []
@@ -3720,7 +3785,9 @@ class CountdownWindow(QMainWindow):
                 or not has_end_time
                 or not has_goal_seconds
             )
-            fallback_goal = self.super_goal_seconds if self.super_goal_seconds > 0 else 0
+            if fallback_goal_seconds is None:
+                fallback_goal_seconds = self.super_goal_seconds
+            fallback_goal = fallback_goal_seconds if fallback_goal_seconds > 0 else 0
             for row in reader:
                 date_key = row.get("date")
                 duration_str = row.get("duration_seconds")
@@ -4015,6 +4082,7 @@ class CountdownWindow(QMainWindow):
             self._restore_profile_selection()
             return
         self._custom_profiles.append(label)
+        self._save_profile_super_goal_seconds(label, self.super_goal_seconds)
         self._active_profile = label
         self._data_file_path = self._profile_file_path(label)
         self._save_profile_settings()
@@ -4044,6 +4112,7 @@ class CountdownWindow(QMainWindow):
             except OSError:
                 LOGGER.exception("Failed to delete profile file")
         self._clear_profile_color(label)
+        self._clear_profile_super_goal(label)
         if was_active:
             self._active_profile = DEFAULT_PROFILE_NAME
         self._save_profile_settings()
@@ -4059,6 +4128,7 @@ class CountdownWindow(QMainWindow):
         if self.clock_active:
             self._stop_clock("Clock off")
         self._active_profile = label
+        self.super_goal_seconds = self._load_profile_super_goal_seconds(label)
         self._data_file_path = self._profile_file_path(label)
         self._last_added_time_entry = None
         self._last_added_time_index = None
@@ -4216,13 +4286,9 @@ class CountdownWindow(QMainWindow):
         settings.sync()
 
     def _save_super_goal(self) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
-        settings.setValue("super_goal/hours", self.super_goal_seconds // 3600)
-        settings.setValue(
-            "super_goal/minutes",
-            (self.super_goal_seconds % 3600) // 60,
+        self._save_profile_super_goal_seconds(
+            self._active_profile, self.super_goal_seconds
         )
-        settings.sync()
 
     def _apply_heatmap_geometry(self, size: int, month_padding: int) -> bool:
         clamped = max(HEATMAP_CELL_SIZE_MIN, min(HEATMAP_CELL_SIZE_MAX, int(size)))
