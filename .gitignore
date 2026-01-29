@@ -24,3 +24,5 @@ anki.csv
 output.csv
 phonetic.csv
 soroban.csv
+*.log
+*.ini

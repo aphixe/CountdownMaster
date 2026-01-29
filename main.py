@@ -4044,8 +4044,25 @@ class CountdownWindow(QMainWindow):
                 self.profile_combo.setCurrentIndex(index)
                 return
 
+    def _profile_change_locked(self) -> bool:
+        return self.timer_active or self.clock_active
+
+    def _deny_profile_change(self) -> None:
+        if self.clock_active:
+            message = "Turn off the clock to change profile"
+        else:
+            message = "Pause the timer to change profile"
+        self.status_label.setText(message)
+        if hasattr(self, "profile_combo"):
+            self.profile_combo.blockSignals(True)
+            self._restore_profile_selection()
+            self.profile_combo.blockSignals(False)
+
     def _on_profile_changed(self, index: int) -> None:
         if index < 0:
+            return
+        if self._profile_change_locked():
+            self._deny_profile_change()
             return
         data = self.profile_combo.itemData(index)
         if data == PROFILE_ACTION_ADD:
