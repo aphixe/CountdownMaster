@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QPushButton,
+    QSlider,
     QSpinBox,
     QStackedLayout,
     QTabWidget,
@@ -125,6 +126,7 @@ class UiSettings:
     show_clock_button: bool = True
     show_longest_streak: bool = True
     show_current_streak: bool = True
+    use_24h_time: bool = True
 
 
 @dataclass
@@ -142,6 +144,16 @@ class GraphSeries:
     line_color: QColor
     dot_color: QColor
     fill_color: QColor
+
+
+@dataclass(frozen=True)
+class CalendarBlock:
+    day_index: int
+    start_seconds: int
+    end_seconds: int
+    label: str
+    color: QColor
+    profile_label: str
 
 
 XINPUT_BUTTONS = {
@@ -299,6 +311,16 @@ PROFILE_COLOR_PALETTE = (
     "#14b8a6",
     "#eab308",
 )
+CALENDAR_LEFT_MARGIN = 68
+CALENDAR_HEADER_HEIGHT = 52
+CALENDAR_MIN_DAY_WIDTH = 120
+CALENDAR_SCALE_MINUTES_MIN = 5
+CALENDAR_SCALE_MINUTES_MAX = 120
+CALENDAR_SCALE_HEIGHT_MIN = 20
+CALENDAR_SCALE_HEIGHT_MAX = 100
+CALENDAR_PROFILE_ALL = "__calendar_all_profiles__"
+CALENDAR_DAY_PADDING = 4
+CALENDAR_BOTTOM_PADDING = 14
 
 
 def setup_logging(log_path: str) -> None:
@@ -557,6 +579,14 @@ class SettingsDialog(QDialog):
         self.week_end_combo.currentIndexChanged.connect(self._on_week_end_changed)
         self._sync_week_end_from_start()
 
+        self.time_format_combo = QComboBox()
+        self.time_format_combo.addItem("24 hour", True)
+        self.time_format_combo.addItem("12 hour (AM/PM)", False)
+        time_index = self.time_format_combo.findData(ui_settings.use_24h_time)
+        if time_index < 0:
+            time_index = 0
+        self.time_format_combo.setCurrentIndex(time_index)
+
         self.total_today_font_spin = QSpinBox()
         self.total_today_font_spin.setRange(10, 48)
         self.total_today_font_spin.setValue(ui_settings.total_today_font_size)
@@ -755,6 +785,11 @@ class SettingsDialog(QDialog):
         week_range_form.addRow("End Day", self.week_end_combo)
         week_range_group.setLayout(week_range_form)
 
+        time_format_group = QGroupBox("Time Format")
+        time_format_form = QFormLayout()
+        time_format_form.addRow("Display", self.time_format_combo)
+        time_format_group.setLayout(time_format_form)
+
         pulse_group = QGroupBox("Goal Pulse")
         pulse_form = QFormLayout()
         pulse_form.addRow("Glow Duration (sec)", self.goal_pulse_spin)
@@ -765,6 +800,9 @@ class SettingsDialog(QDialog):
         day_layout.addWidget(_make_divider())
         day_layout.addWidget(_make_heading("Week Totals"))
         day_layout.addWidget(week_range_group)
+        day_layout.addWidget(_make_divider())
+        day_layout.addWidget(_make_heading("Time Format"))
+        day_layout.addWidget(time_format_group)
         day_layout.addWidget(_make_divider())
         day_layout.addWidget(_make_heading("Goal Pulse"))
         day_layout.addWidget(pulse_group)
@@ -915,6 +953,7 @@ class SettingsDialog(QDialog):
 
     def updated_settings(self) -> UiSettings:
         blur_radius = self.blur_spin.value() if self._blur_supported else 0
+        use_24h_time = bool(self.time_format_combo.currentData())
         return UiSettings(
             blur_radius=blur_radius,
             opacity=self.opacity_spin.value(),
@@ -964,6 +1003,7 @@ class SettingsDialog(QDialog):
             show_clock_button=self._settings.show_clock_button,
             show_longest_streak=self._settings.show_longest_streak,
             show_current_streak=self._settings.show_current_streak,
+            use_24h_time=use_24h_time,
         )
 
 
@@ -1367,6 +1407,798 @@ class GlowFrame(QFrame):
             inset = int(width / 2) + 1
             rect = self.rect().adjusted(inset, inset, -inset, -inset)
             painter.drawRoundedRect(rect, self._radius, self._radius)
+
+
+class CalendarHeaderWidget(QWidget):
+    def __init__(
+        self,
+        ui_settings: UiSettings,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._settings = ui_settings
+        self._week_start = QDate.currentDate()
+        self._totals: list[int] = [0] * 7
+        self.setMinimumHeight(CALENDAR_HEADER_HEIGHT)
+        self.setFixedHeight(CALENDAR_HEADER_HEIGHT)
+        self.setMinimumWidth(CALENDAR_LEFT_MARGIN + (CALENDAR_MIN_DAY_WIDTH * 7))
+
+    def set_week_start(self, date: QDate) -> None:
+        if not date.isValid():
+            return
+        self._week_start = date
+        self.update()
+
+    def set_daily_totals(self, totals: list[int]) -> None:
+        if len(totals) != 7:
+            return
+        self._totals = [max(0, int(value)) for value in totals]
+        self.update()
+
+    def _day_width(self) -> float:
+        available = max(0.0, self.width() - CALENDAR_LEFT_MARGIN)
+        return max(CALENDAR_MIN_DAY_WIDTH, available / 7)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = self.rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+
+        header_bg = QColor(self._settings.bg_color)
+        header_bg.setAlpha(200)
+        painter.fillRect(rect, header_bg)
+
+        day_width = self._day_width()
+        label_color = QColor(self._settings.text_color)
+        label_color.setAlpha(220)
+        painter.setPen(label_color)
+        header_font = QFont(painter.font())
+        header_font.setBold(True)
+        painter.setFont(header_font)
+        totals_font = QFont(painter.font())
+        totals_font.setBold(False)
+        point_size = totals_font.pointSize()
+        if point_size > 0:
+            totals_font.setPointSize(max(7, point_size - 2))
+        for day_idx in range(7):
+            date = self._week_start.addDays(day_idx)
+            x = CALENDAR_LEFT_MARGIN + (day_idx * day_width)
+            header_rect = QRectF(x, 0, day_width, CALENDAR_HEADER_HEIGHT)
+            day_rect = QRectF(x, 0, day_width, CALENDAR_HEADER_HEIGHT * 0.6)
+            total_rect = QRectF(
+                x,
+                CALENDAR_HEADER_HEIGHT * 0.55,
+                day_width,
+                CALENDAR_HEADER_HEIGHT * 0.45,
+            )
+            label = date.toString("ddd MMM d")
+            painter.setFont(header_font)
+            painter.drawText(day_rect, Qt.AlignCenter, label)
+            painter.setFont(totals_font)
+            total_label = format_duration_hm(self._totals[day_idx])
+            painter.drawText(total_rect, Qt.AlignCenter, total_label)
+
+        sep_color = QColor(self._settings.graph_grid_color)
+        sep_color.setAlpha(180)
+        painter.setPen(QPen(sep_color, 1.2))
+        for day_idx in range(8):
+            x = CALENDAR_LEFT_MARGIN + (day_idx * day_width)
+            painter.drawLine(x, 0, x, CALENDAR_HEADER_HEIGHT)
+        painter.drawLine(
+            CALENDAR_LEFT_MARGIN,
+            CALENDAR_HEADER_HEIGHT - 1,
+            CALENDAR_LEFT_MARGIN + (day_width * 7),
+            CALENDAR_HEADER_HEIGHT - 1,
+        )
+
+
+class CalendarViewWidget(QWidget):
+    def __init__(
+        self,
+        ui_settings: UiSettings,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._settings = ui_settings
+        self._entries: list[dict[str, object]] = []
+        self._entry_colors: list[QColor] = []
+        self._entry_labels: list[str] = []
+        self._blocks: list[CalendarBlock] = []
+        self._hover_block: Optional[CalendarBlock] = None
+        self._week_start = QDate.currentDate()
+        self._scale_minutes = 15.0
+        self._scale_step_minutes = 15
+        self._scale_anim: Optional[QVariantAnimation] = None
+        self._profile_color = QColor(ui_settings.accent_color)
+        self._left_margin = CALENDAR_LEFT_MARGIN
+        self._header_height = 0
+        self._day_padding = CALENDAR_DAY_PADDING
+        self._bottom_padding = CALENDAR_BOTTOM_PADDING
+        self._min_day_width = CALENDAR_MIN_DAY_WIDTH
+        self.setMinimumWidth(self._left_margin + (self._min_day_width * 7))
+        self.setMouseTracking(True)
+        self._update_geometry()
+
+    def set_entries(
+        self,
+        entries: list[dict[str, object]],
+        *,
+        profile_color: Optional[QColor] = None,
+        entry_colors: Optional[list[QColor]] = None,
+        entry_labels: Optional[list[str]] = None,
+    ) -> None:
+        self._entries = list(entries)
+        if profile_color is not None and profile_color.isValid():
+            self._profile_color = QColor(profile_color)
+        self._entry_colors = (
+            [QColor(color) for color in entry_colors]
+            if entry_colors is not None
+            else []
+        )
+        self._entry_labels = (
+            [str(label) for label in entry_labels]
+            if entry_labels is not None
+            else []
+        )
+        self._rebuild_blocks()
+        self.update()
+
+    def set_week_start(self, date: QDate) -> None:
+        if not date.isValid():
+            return
+        self._week_start = date
+        self._rebuild_blocks()
+        self.update()
+
+    def set_profile_color(self, color: QColor) -> None:
+        if not color.isValid():
+            return
+        self._profile_color = QColor(color)
+        self.update()
+
+    def set_scale_minutes(self, minutes: int, *, animate: bool = False) -> None:
+        minutes = max(5, int(minutes))
+        self._scale_step_minutes = minutes
+        if math.isclose(minutes, self._scale_minutes):
+            return
+        if animate:
+            self._animate_scale(minutes)
+            return
+        if self._scale_anim is not None:
+            self._scale_anim.stop()
+        self._scale_minutes = float(minutes)
+        self._update_geometry()
+        self.update()
+
+    def _animate_scale(self, minutes: int) -> None:
+        start = float(self._scale_minutes)
+        end = float(minutes)
+        if math.isclose(start, end):
+            return
+        if self._scale_anim is None:
+            self._scale_anim = QVariantAnimation(self)
+            self._scale_anim.setEasingCurve(QEasingCurve.InOutCubic)
+            self._scale_anim.valueChanged.connect(self._on_scale_animated)
+        self._scale_anim.stop()
+        self._scale_anim.setStartValue(start)
+        self._scale_anim.setEndValue(end)
+        self._scale_anim.setDuration(220)
+        self._scale_anim.start()
+
+    def _on_scale_animated(self, value: object) -> None:
+        try:
+            self._scale_minutes = float(value)
+        except (TypeError, ValueError):
+            return
+        self._update_geometry()
+        self.update()
+
+    def _update_geometry(self) -> None:
+        total_minutes = 24 * 60
+        pixels_per_minute = self._pixels_per_minute()
+        day_height = total_minutes * pixels_per_minute
+        height = day_height + self._bottom_padding
+        self.setFixedHeight(int(height))
+        self.updateGeometry()
+
+    def _parse_time_value(self, value: object) -> Optional[QTime]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text or text.lower() == "n/a":
+            return None
+        for fmt in ("HH:mm:ss", "HH:mm"):
+            time = QTime.fromString(text, fmt)
+            if time.isValid():
+                return time
+        return None
+
+    def _entry_end_time(self, entry: dict[str, object], start: QTime) -> Optional[QTime]:
+        end_time = self._parse_time_value(entry.get("end_time"))
+        if end_time is not None:
+            return end_time
+        try:
+            duration = int(entry.get("duration_seconds", 0))
+        except (TypeError, ValueError):
+            duration = 0
+        if duration <= 0:
+            return None
+        return start.addSecs(duration)
+
+    def _rebuild_blocks(self) -> None:
+        self._blocks = []
+        if not self._entries:
+            return
+        start_date = self._week_start
+        end_date = start_date.addDays(6)
+        for idx, entry in enumerate(self._entries):
+            date_key = entry.get("date")
+            if not date_key:
+                continue
+            date = QDate.fromString(str(date_key), "yyyy-MM-dd")
+            if not date.isValid():
+                continue
+            if date < start_date or date > end_date:
+                continue
+            start_time = self._parse_time_value(entry.get("start_time"))
+            if start_time is None:
+                continue
+            end_time = self._entry_end_time(entry, start_time)
+            if end_time is None:
+                continue
+            start_seconds = (
+                start_time.hour() * 3600
+                + start_time.minute() * 60
+                + start_time.second()
+            )
+            end_seconds = (
+                end_time.hour() * 3600
+                + end_time.minute() * 60
+                + end_time.second()
+            )
+            if end_seconds <= start_seconds:
+                continue
+            start_seconds = max(0, min(24 * 3600, start_seconds))
+            end_seconds = max(0, min(24 * 3600, end_seconds))
+            if end_seconds <= start_seconds:
+                continue
+            label = f"{self._format_time(start_time)} - {self._format_time(end_time)}"
+            color = (
+                self._entry_colors[idx]
+                if idx < len(self._entry_colors)
+                else self._profile_color
+            )
+            if not color.isValid():
+                color = self._profile_color
+            profile_label = (
+                self._entry_labels[idx] if idx < len(self._entry_labels) else ""
+            )
+            self._blocks.append(
+                CalendarBlock(
+                    day_index=start_date.daysTo(date),
+                    start_seconds=start_seconds,
+                    end_seconds=end_seconds,
+                    label=label,
+                    color=color,
+                    profile_label=profile_label,
+                )
+            )
+        self._blocks.sort(key=lambda block: (block.day_index, block.start_seconds))
+
+    def _day_width(self) -> float:
+        available = max(0.0, self.width() - self._left_margin)
+        return max(self._min_day_width, available / 7)
+
+    def _scale_unit_height(self) -> float:
+        min_minutes = CALENDAR_SCALE_MINUTES_MIN
+        max_minutes = CALENDAR_SCALE_MINUTES_MAX
+        min_height = CALENDAR_SCALE_HEIGHT_MIN
+        max_height = CALENDAR_SCALE_HEIGHT_MAX
+        minutes = max(min_minutes, min(max_minutes, self._scale_minutes))
+        if max_minutes <= min_minutes:
+            return max_height
+        ratio = (minutes - min_minutes) / (max_minutes - min_minutes)
+        return max_height + (min_height - max_height) * ratio
+
+    def _pixels_per_minute(self) -> float:
+        return self._scale_unit_height() / max(1, self._scale_minutes)
+
+    def _format_duration_seconds(self, seconds: int) -> str:
+        seconds = max(0, int(seconds))
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes = seconds // 60
+        hours = minutes // 60
+        rem = minutes % 60
+        if hours <= 0:
+            return f"{minutes}m"
+        if rem == 0:
+            return f"{hours}h"
+        return f"{hours}h {rem}m"
+
+    def _format_time(self, time: QTime) -> str:
+        if self._settings.use_24h_time:
+            return time.toString("HH:mm")
+        return time.toString("h:mm AP")
+
+    def _format_hour_label(self, hour: int) -> str:
+        time = QTime(hour, 0)
+        if self._settings.use_24h_time:
+            return time.toString("HH:mm")
+        return time.toString("h AP")
+
+    def _text_color_for_block(self, color: QColor) -> QColor:
+        luminance = (color.red() * 0.299) + (color.green() * 0.587) + (color.blue() * 0.114)
+        return QColor("#111827") if luminance >= 150 else QColor("#f8fafc")
+
+    def _block_rect(self, block: CalendarBlock) -> QRectF:
+        day_width = self._day_width()
+        pixels_per_minute = self._pixels_per_minute()
+        start_y = (block.start_seconds / 60.0) * pixels_per_minute
+        end_y = (block.end_seconds / 60.0) * pixels_per_minute
+        height = max(6.0, end_y - start_y)
+        x = self._left_margin + (block.day_index * day_width) + self._day_padding
+        width = day_width - (self._day_padding * 2)
+        return QRectF(x, start_y, width, height)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = self.rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        painter.fillRect(rect, self.palette().window())
+
+        day_width = self._day_width()
+        total_minutes = 24 * 60
+        pixels_per_minute = self._pixels_per_minute()
+        day_height = total_minutes * pixels_per_minute
+        grid_top = 0
+        grid_bottom = day_height
+
+        base_day_color = QColor(self.palette().window().color())
+        alt_day_color = QColor(base_day_color)
+        if base_day_color.value() > 128:
+            alt_day_color = alt_day_color.darker(104)
+        else:
+            alt_day_color = alt_day_color.lighter(110)
+        for day_idx in range(7):
+            x = self._left_margin + (day_idx * day_width)
+            day_rect = QRectF(x, grid_top, day_width, day_height)
+            painter.fillRect(day_rect, alt_day_color if day_idx % 2 else base_day_color)
+
+        grid_color = QColor(self._settings.graph_grid_color)
+        grid_color.setAlpha(120)
+        minor_pen = QPen(grid_color, 1)
+        major_color = QColor(self._settings.graph_grid_color)
+        major_color.setAlpha(200)
+        major_pen = QPen(major_color, 1.3)
+        painter.setPen(minor_pen)
+        minute_step = max(1, int(self._scale_step_minutes))
+        for minute in range(0, total_minutes + 1, minute_step):
+            y = grid_top + (minute * pixels_per_minute)
+            painter.drawLine(
+                self._left_margin, y, self._left_margin + (day_width * 7), y
+            )
+        painter.setPen(major_pen)
+        for hour in range(0, 25):
+            minute = hour * 60
+            y = grid_top + (minute * pixels_per_minute)
+            painter.drawLine(
+                self._left_margin, y, self._left_margin + (day_width * 7), y
+            )
+
+        sep_color = QColor(self._settings.graph_grid_color)
+        sep_color.setAlpha(180)
+        painter.setPen(QPen(sep_color, 1.2))
+        for day_idx in range(8):
+            x = self._left_margin + (day_idx * day_width)
+            painter.drawLine(x, grid_top, x, grid_bottom)
+
+        painter.setFont(QFont(painter.font()))
+        time_label_font = QFont(painter.font())
+        point_size = time_label_font.pointSize()
+        if point_size > 0:
+            time_label_font.setPointSize(max(7, point_size - 2))
+        painter.setFont(time_label_font)
+        for minute in range(0, total_minutes + 1, minute_step):
+            y = grid_top + (minute * pixels_per_minute)
+            label_rect = QRectF(0, y - 8, self._left_margin - 8, 16)
+            time = QTime(0, 0).addSecs(minute * 60)
+            label = (
+                time.toString("HH:mm")
+                if self._settings.use_24h_time
+                else time.toString("h:mm AP")
+            )
+            painter.drawText(
+                label_rect,
+                Qt.AlignRight | Qt.AlignVCenter,
+                label,
+            )
+
+        for block in self._blocks:
+            block_color = QColor(block.color)
+            block_fill = QColor(block_color)
+            block_fill.setAlpha(170)
+            block_pen = QPen(block_color, 1.2)
+            text_color = self._text_color_for_block(block_color)
+            rect = self._block_rect(block).translated(0, grid_top)
+            block_height = rect.height()
+            painter.setPen(block_pen)
+            painter.setBrush(block_fill)
+            painter.drawRoundedRect(rect, 6, 6)
+            if block_height >= 18:
+                painter.setPen(text_color)
+                painter.drawText(
+                    rect.adjusted(6, 4, -6, -4),
+                    Qt.AlignLeft | Qt.AlignTop,
+                    block.label,
+                )
+
+        today = QDate.currentDate()
+        if self._week_start <= today <= self._week_start.addDays(6):
+            day_idx = self._week_start.daysTo(today)
+            now = QTime.currentTime()
+            now_seconds = (now.hour() * 3600) + (now.minute() * 60) + now.second()
+            y = grid_top + ((now_seconds / 60.0) * pixels_per_minute)
+            line_color = QColor(self._settings.accent_color)
+            line_color.setAlpha(230)
+            painter.setPen(QPen(line_color, 1.6))
+            x0 = self._left_margin + (day_idx * day_width)
+            x1 = x0 + day_width
+            painter.drawLine(x0, y, x1, y)
+            bubble_text = self._format_time(now)
+            metrics = painter.fontMetrics()
+            bubble_width = metrics.horizontalAdvance(bubble_text) + 12
+            bubble_height = metrics.height() + 6
+            bubble_x = x0 + 6
+            bubble_y = y - (bubble_height / 2)
+            bubble_y = max(grid_top + 2, min(grid_bottom - bubble_height - 2, bubble_y))
+            bubble_rect = QRectF(bubble_x, bubble_y, bubble_width, bubble_height)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(line_color)
+            painter.drawRoundedRect(bubble_rect, 8, 8)
+            painter.setPen(self._text_color_for_block(line_color))
+            painter.drawText(
+                bubble_rect,
+                Qt.AlignCenter,
+                bubble_text,
+            )
+
+        if not self._blocks:
+            hint_color = QColor(self._settings.total_today_color)
+            hint_color.setAlpha(200)
+            painter.setPen(hint_color)
+            hint_rect = QRectF(
+                self._left_margin,
+                grid_top,
+                day_width * 7,
+                max(0.0, day_height),
+            )
+            painter.drawText(
+                hint_rect,
+                Qt.AlignCenter,
+                "No entries for this week",
+            )
+
+    def mouseMoveEvent(self, event) -> None:
+        if not self._blocks:
+            if self._hover_block is not None:
+                self._hover_block = None
+                QToolTip.hideText()
+            return
+        pos = event.position()
+        hovered = None
+        for block in self._blocks:
+            if self._block_rect(block).contains(pos):
+                hovered = block
+                break
+        if hovered == self._hover_block:
+            return
+        self._hover_block = hovered
+        if hovered is None:
+            QToolTip.hideText()
+            return
+        seconds = hovered.end_seconds - hovered.start_seconds
+        tooltip = self._format_duration_seconds(seconds)
+        if hovered.profile_label:
+            text = f"{hovered.profile_label}\nTotal: {tooltip}"
+        else:
+            text = f"Total: {tooltip}"
+        QToolTip.showText(event.globalPos(), text, self)
+
+    def leaveEvent(self, event) -> None:
+        self._hover_block = None
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+
+class CalendarViewDialog(QDialog):
+    def __init__(
+        self,
+        parent: "CountdownWindow",
+        ui_settings: UiSettings,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Calendar View")
+        self.setModal(True)
+        self._parent = parent
+        self._settings = ui_settings
+        self._scale_options = [5, 10, 15, 30, 60]
+        self._entries_by_profile: dict[str, list[dict[str, object]]] = {}
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItem("All Profiles", CALENDAR_PROFILE_ALL)
+        for label in parent._profile_labels():
+            self.profile_combo.addItem(label, label)
+        self._restore_profile_selection()
+
+        self.week_label = QLabel()
+        self.prev_week_btn = QPushButton("Prev")
+        self.next_week_btn = QPushButton("Next")
+        self.today_btn = QPushButton("This Week")
+
+        self.scale_label = QLabel()
+        self.scale_slider = QSlider(Qt.Horizontal)
+        self.scale_slider.setRange(0, len(self._scale_options) - 1)
+        self._restore_scale_selection()
+        self.scale_slider.setTickPosition(QSlider.TicksBelow)
+        self.scale_slider.setTickInterval(1)
+
+        self.header_widget = CalendarHeaderWidget(ui_settings)
+        self.header_scroll = QScrollArea()
+        self.header_scroll.setWidget(self.header_widget)
+        self.header_scroll.setWidgetResizable(False)
+        self.header_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.header_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.header_scroll.setFixedHeight(CALENDAR_HEADER_HEIGHT)
+
+        self.calendar_widget = CalendarViewWidget(ui_settings)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidget(self.calendar_widget)
+        self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        self._week_start = self._monday_for_date(QDate.currentDate())
+        self._sync_week_label()
+        self._sync_scale_label()
+        self._sync_calendar()
+
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Profile"))
+        controls.addWidget(self.profile_combo)
+        controls.addSpacing(12)
+        controls.addWidget(self.prev_week_btn)
+        controls.addWidget(self.week_label)
+        controls.addWidget(self.next_week_btn)
+        controls.addWidget(self.today_btn)
+        controls.addStretch(1)
+        controls.addWidget(QLabel("Scale"))
+        controls.addWidget(self.scale_slider)
+        controls.addWidget(self.scale_label)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        footer.addWidget(close_btn)
+
+        layout = QVBoxLayout()
+        layout.addLayout(controls)
+        layout.addWidget(self.header_scroll)
+        layout.addWidget(self.scroll_area)
+        layout.addLayout(footer)
+        self.setLayout(layout)
+        self.resize(980, 640)
+
+        self.profile_combo.currentTextChanged.connect(self._sync_calendar)
+        self.prev_week_btn.clicked.connect(lambda: self._shift_week(-7))
+        self.next_week_btn.clicked.connect(lambda: self._shift_week(7))
+        self.today_btn.clicked.connect(self._jump_to_current_week)
+        self.scale_slider.valueChanged.connect(self._sync_scale_label)
+        self.scale_slider.valueChanged.connect(self._sync_calendar_scale)
+        self.scroll_area.horizontalScrollBar().valueChanged.connect(
+            self.header_scroll.horizontalScrollBar().setValue
+        )
+        self.scroll_area.verticalScrollBar().rangeChanged.connect(
+            self._sync_header_margin
+        )
+        self._sync_header_margin()
+        self._update_calendar_width()
+
+        self._now_timer = QTimer(self)
+        self._now_timer.setInterval(30000)
+        self._now_timer.timeout.connect(self.calendar_widget.update)
+        self._now_timer.start()
+
+    def _monday_for_date(self, date: QDate) -> QDate:
+        if not date.isValid():
+            return QDate.currentDate()
+        return date.addDays(1 - date.dayOfWeek())
+
+    def _sync_week_label(self) -> None:
+        start = self._week_start
+        end = start.addDays(6)
+        if start.year() == end.year():
+            label = f"{start.toString('MMM d')} - {end.toString('MMM d, yyyy')}"
+        else:
+            label = f"{start.toString('MMM d, yyyy')} - {end.toString('MMM d, yyyy')}"
+        self.week_label.setText(label)
+
+    def _sync_scale_label(self) -> None:
+        minutes = self._scale_options[self.scale_slider.value()]
+        unit = "hour" if minutes >= 60 and minutes % 60 == 0 else "min"
+        if unit == "hour":
+            hours = minutes // 60
+            text = f"{hours} hour" if hours == 1 else f"{hours} hours"
+        else:
+            text = f"{minutes} min"
+        self.scale_label.setText(text)
+
+    def _sync_calendar_scale(self) -> None:
+        minutes = self._scale_options[self.scale_slider.value()]
+        self.calendar_widget.set_scale_minutes(minutes, animate=True)
+        self._update_calendar_width()
+        self._save_scale_selection()
+
+    def _sync_calendar_scale_initial(self) -> None:
+        minutes = self._scale_options[self.scale_slider.value()]
+        self.calendar_widget.set_scale_minutes(minutes, animate=False)
+        self._update_calendar_width()
+
+    def _restore_scale_selection(self) -> None:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        saved = settings.value("calendar/scale_minutes", None)
+        if isinstance(saved, str) and saved:
+            try:
+                saved = int(saved)
+            except ValueError:
+                saved = None
+        if isinstance(saved, (int, float)):
+            try:
+                index = self._scale_options.index(int(saved))
+                self.scale_slider.setValue(index)
+                return
+            except ValueError:
+                pass
+        self.scale_slider.setValue(self._scale_options.index(15))
+
+    def _save_scale_selection(self) -> None:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        minutes = self._scale_options[self.scale_slider.value()]
+        settings.setValue("calendar/scale_minutes", int(minutes))
+        settings.sync()
+
+    def _sync_header_margin(self) -> None:
+        scrollbar = self.scroll_area.verticalScrollBar()
+        width = scrollbar.sizeHint().width() if scrollbar.maximum() > 0 else 0
+        self.header_scroll.setViewportMargins(0, 0, width, 0)
+
+    def _update_calendar_width(self) -> None:
+        viewport_width = self.scroll_area.viewport().width()
+        target_width = max(self.calendar_widget.minimumWidth(), viewport_width)
+        self.calendar_widget.setFixedWidth(target_width)
+        self.header_widget.setFixedWidth(target_width)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_calendar_width()
+
+    def _load_entries_for_profile(self, label: str) -> list[dict[str, object]]:
+        if label in self._entries_by_profile:
+            return self._entries_by_profile[label]
+        path = self._parent._profile_file_path(label)
+        fallback_goal = self._parent._load_profile_super_goal_seconds(label)
+        entries, _, _ = self._parent._load_log_entries_from_path(
+            path, fallback_goal_seconds=fallback_goal
+        )
+        self._entries_by_profile[label] = entries
+        return entries
+
+    def _load_all_profile_entries(
+        self,
+    ) -> tuple[list[dict[str, object]], list[QColor], list[str]]:
+        combined: list[dict[str, object]] = []
+        colors: list[QColor] = []
+        labels: list[str] = []
+        for label in self._parent._profile_labels():
+            entries = self._load_entries_for_profile(label)
+            color = self._parent._profile_color(label)
+            for entry in entries:
+                combined.append(entry)
+                colors.append(QColor(color))
+                labels.append(label)
+        return combined, colors, labels
+
+    def _compute_week_totals(self, entries: list[dict[str, object]]) -> list[int]:
+        totals = [0] * 7
+        start = self._week_start
+        end = start.addDays(6)
+        for entry in entries:
+            date_key = entry.get("date")
+            if not date_key:
+                continue
+            date = QDate.fromString(str(date_key), "yyyy-MM-dd")
+            if not date.isValid():
+                continue
+            if date < start or date > end:
+                continue
+            try:
+                duration = int(entry.get("duration_seconds", 0))
+            except (TypeError, ValueError):
+                duration = 0
+            if duration <= 0:
+                continue
+            index = start.daysTo(date)
+            if 0 <= index < 7:
+                totals[index] += duration
+        return totals
+
+    def _sync_calendar_all(self) -> None:
+        entries, colors, labels = self._load_all_profile_entries()
+        self.calendar_widget.set_entries(
+            entries,
+            profile_color=self._parent.settings.accent_color,
+            entry_colors=colors,
+            entry_labels=labels,
+        )
+        self.calendar_widget.set_week_start(self._week_start)
+        self.header_widget.set_week_start(self._week_start)
+        self.header_widget.set_daily_totals(self._compute_week_totals(entries))
+        self._sync_calendar_scale_initial()
+
+    def _sync_calendar(self) -> None:
+        profile_data = self.profile_combo.currentData()
+        if not profile_data:
+            return
+        self._save_profile_selection()
+        if profile_data == CALENDAR_PROFILE_ALL:
+            self._sync_calendar_all()
+            return
+        if not isinstance(profile_data, str):
+            return
+        entries = self._load_entries_for_profile(profile_data)
+        color = self._parent._profile_color(profile_data)
+        self.calendar_widget.set_entries(entries, profile_color=color)
+        self.calendar_widget.set_week_start(self._week_start)
+        self.header_widget.set_week_start(self._week_start)
+        self.header_widget.set_daily_totals(self._compute_week_totals(entries))
+        self._sync_calendar_scale_initial()
+        self._save_profile_selection()
+
+    def _restore_profile_selection(self) -> None:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        saved = settings.value("calendar/selected_profile", "")
+        if isinstance(saved, str) and saved:
+            index = self.profile_combo.findData(saved)
+            if index >= 0:
+                self.profile_combo.setCurrentIndex(index)
+                return
+        active_index = self.profile_combo.findData(self._parent._active_profile)
+        if active_index >= 0:
+            self.profile_combo.setCurrentIndex(active_index)
+
+    def _save_profile_selection(self) -> None:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        value = self.profile_combo.currentData()
+        if value is None:
+            return
+        settings.setValue("calendar/selected_profile", str(value))
+        settings.sync()
+
+    def _shift_week(self, days: int) -> None:
+        self._week_start = self._week_start.addDays(days)
+        self._sync_week_label()
+        self._sync_calendar()
+
+    def _jump_to_current_week(self) -> None:
+        self._week_start = self._monday_for_date(QDate.currentDate())
+        self._sync_week_label()
+        self._sync_calendar()
 
 
 class TrendsGraphWidget(QWidget):
@@ -2295,6 +3127,7 @@ class CountdownWindow(QMainWindow):
         undo_add_time.setEnabled(self._last_added_time_entry is not None)
         set_super_goal = QAction("Set Daily Super Goal", self)
         logs = QAction("Logs", self)
+        calendar_view = QAction("Calendar View", self)
         trends_graph = QAction("Trends Graph", self)
         profile_editor = QAction("Profile Editor", self)
         always_on_top = QAction("Always On Top", self)
@@ -2310,6 +3143,7 @@ class CountdownWindow(QMainWindow):
         undo_add_time.triggered.connect(self._undo_added_time)
         set_super_goal.triggered.connect(self._open_set_super_goal)
         logs.triggered.connect(self._open_logs)
+        calendar_view.triggered.connect(self._open_calendar_view)
         trends_graph.triggered.connect(self._open_trends_graph)
         profile_editor.triggered.connect(self._open_profile_editor)
         always_on_top.toggled.connect(self._toggle_always_on_top)
@@ -2353,18 +3187,27 @@ class CountdownWindow(QMainWindow):
         reset_visibility = QAction("Reset UI Visibility", self)
         reset_visibility.triggered.connect(self._reset_ui_visibility)
         visibility_menu.addAction(reset_visibility)
-        menu.addAction(set_time)
-        menu.addAction(add_time)
-        menu.addAction(undo_add_time)
-        menu.addAction(set_super_goal)
-        menu.addAction(logs)
-        menu.addAction(trends_graph)
-        menu.addAction(profile_editor)
+        time_menu = menu.addMenu("Time")
+        time_menu.addAction(set_time)
+        time_menu.addAction(add_time)
+        time_menu.addAction(undo_add_time)
+        time_menu.addAction(set_super_goal)
+        time_menu.addSeparator()
+        time_menu.addAction(reset_clock)
+        time_menu.addAction(reset_time)
+
+        data_menu = menu.addMenu("Data")
+        data_menu.addAction(calendar_view)
+        data_menu.addAction(logs)
+        data_menu.addAction(trends_graph)
+
         menu.addAction(always_on_top)
-        menu.addAction(reset_clock)
-        menu.addAction(reset_time)
-        menu.addAction(settings)
-        menu.addAction(hotkey_settings)
+        menu.addAction(profile_editor)
+
+        settings_menu = menu.addMenu("Settings")
+        settings_menu.addAction(settings)
+        settings_menu.addAction(hotkey_settings)
+
         menu.addSeparator()
         menu.addAction(quit_action)
         return menu
@@ -2491,6 +3334,10 @@ class CountdownWindow(QMainWindow):
             self.daily_totals,
             self.settings,
         )
+        dialog.exec()
+
+    def _open_calendar_view(self) -> None:
+        dialog = CalendarViewDialog(self, self.settings)
         dialog.exec()
 
     def _graph_series(self) -> list[GraphSeries]:
@@ -3662,6 +4509,10 @@ class CountdownWindow(QMainWindow):
             settings.value("ui/show_current_streak", ui.show_current_streak),
             ui.show_current_streak,
         )
+        ui.use_24h_time = parse_bool(
+            settings.value("ui/use_24h_time", ui.use_24h_time),
+            ui.use_24h_time,
+        )
         return ui
 
     def _load_hotkey_settings(self) -> HotkeySettings:
@@ -4288,6 +5139,7 @@ class CountdownWindow(QMainWindow):
         settings.setValue(
             "ui/show_current_streak", int(self.settings.show_current_streak)
         )
+        settings.setValue("ui/use_24h_time", int(self.settings.use_24h_time))
         settings.sync()
 
     def _save_hotkey_settings(self) -> None:
