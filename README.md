@@ -14,10 +14,11 @@ PySide6 (Qt) and stores data locally in `data.csv` plus preferences in
 
 ## Features
 
+- (New) Add support for Linux and mac for gamepad support using pygame (if you have old version re-run requirements)
 - (Change) Reordered the right click menu
 - (NEW) Added Calendar View, shows time blocks
 - (New) Profile editor to change color, shown in trends graph
-- (New) Hotkey setting in right click to toggle buttons on off with keyboard or gamepad using xinput
+- (New) Hotkey setting in right click to toggle buttons on/off with keyboard or gamepad (XInput on Windows, (since 1/30/2026 SDL via pygame on macOS/Linux)
 - (New) Clock On/off, just click to start tracking, no goal needed adds to your daily tracking
 - (New) Hide Menu UI, remove something you don't need so you can make size smaller
 - (New) Log, now shows week of tracking for the date selected
@@ -40,7 +41,7 @@ PySide6 (Qt) and stores data locally in `data.csv` plus preferences in
 - Python 3.9+ (PySide6 supports 3.8+)
 - Windows, macOS, or Linux(will have to virtual machine test Linux) with a desktop environment
 
-Dependencies are listed in `requirements.txt`.
+Dependencies are listed in `requirements.txt` (includes `pygame` for cross-platform gamepad support).
 
 ## Install
 

@@ -173,6 +173,23 @@ XINPUT_BUTTONS = {
     "Y": 0x8000,
 }
 
+PYGAME_BUTTON_MAP = {
+    "DPad Up": ("hat", (0, 1)),
+    "DPad Down": ("hat", (0, -1)),
+    "DPad Left": ("hat", (-1, 0)),
+    "DPad Right": ("hat", (1, 0)),
+    "Start": ("button", 7),
+    "Back": ("button", 6),
+    "Left Stick": ("button", 8),
+    "Right Stick": ("button", 9),
+    "Left Shoulder": ("button", 4),
+    "Right Shoulder": ("button", 5),
+    "A": ("button", 0),
+    "B": ("button", 1),
+    "X": ("button", 2),
+    "Y": ("button", 3),
+}
+
 
 class XINPUT_GAMEPAD(ctypes.Structure):
     _fields_ = [
@@ -195,6 +212,7 @@ class XINPUT_STATE(ctypes.Structure):
 
 class XInputReader:
     def __init__(self) -> None:
+        self.backend_name = "XInput"
         self._dll = self._load_xinput()
         self.available = self._dll is not None
         if self.available:
@@ -222,6 +240,99 @@ class XInputReader:
         if result != 0:
             return None
         return int(state.Gamepad.wButtons)
+
+
+class PygameGamepadReader:
+    def __init__(self) -> None:
+        self.backend_name = "SDL"
+        self._pygame = None
+        self._joystick = None
+        try:
+            import pygame
+
+            self._pygame = pygame
+            self._pygame.init()
+            self._pygame.joystick.init()
+            self._ensure_joystick()
+            self.available = True
+        except Exception:
+            self.available = False
+
+    def _ensure_joystick(self) -> None:
+        if self._pygame is None:
+            return
+        try:
+            count = self._pygame.joystick.get_count()
+        except Exception:
+            self._joystick = None
+            return
+        if count <= 0:
+            self._joystick = None
+            return
+        if self._joystick is None:
+            try:
+                self._joystick = self._pygame.joystick.Joystick(0)
+                self._joystick.init()
+            except Exception:
+                self._joystick = None
+
+    def read_buttons(self, index: int = 0) -> Optional[int]:
+        if self._pygame is None:
+            return None
+        self._ensure_joystick()
+        if self._joystick is None:
+            return None
+        try:
+            self._pygame.event.pump()
+        except Exception:
+            return None
+        buttons = 0
+        hat = (0, 0)
+        try:
+            if self._joystick.get_numhats() > 0:
+                hat = self._joystick.get_hat(0)
+        except Exception:
+            hat = (0, 0)
+        for name, mask in XINPUT_BUTTONS.items():
+            mapping = PYGAME_BUTTON_MAP.get(name)
+            if not mapping:
+                continue
+            kind, value = mapping
+            if kind == "button":
+                try:
+                    if (
+                        self._joystick.get_numbuttons() > value
+                        and self._joystick.get_button(value)
+                    ):
+                        buttons |= mask
+                except Exception:
+                    continue
+            else:
+                hat_x, hat_y = hat
+                if value[0] and hat_x == value[0]:
+                    buttons |= mask
+                if value[1] and hat_y == value[1]:
+                    buttons |= mask
+        return buttons
+
+
+class GamepadReader:
+    def __init__(self) -> None:
+        self._backend = XInputReader()
+        if self._backend.available:
+            self.available = True
+        else:
+            self._backend = PygameGamepadReader()
+            self.available = self._backend.available
+        self.backend_name = (
+            self._backend.backend_name if self.available else ""
+        )
+        self.group_label = (
+            f"Gamepad ({self.backend_name})" if self.backend_name else "Gamepad"
+        )
+
+    def read_buttons(self, index: int = 0) -> Optional[int]:
+        return self._backend.read_buttons(index)
 
 
 def qcolor_to_hex(color: QColor) -> str:
@@ -1104,7 +1215,8 @@ class HotkeySettingsDialog(QDialog):
         self,
         parent: QWidget,
         hotkey_settings: HotkeySettings,
-        xinput_available: bool,
+        gamepad_available: bool,
+        gamepad_label: str,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Hotkey Settings")
@@ -1154,14 +1266,16 @@ class HotkeySettingsDialog(QDialog):
             self.clock_xinput_combo, hotkey_settings.clock_xinput_button
         )
 
-        xinput_group = QGroupBox("XInput")
-        xinput_form = QFormLayout()
-        xinput_form.addRow("Start toggle", self.start_xinput_combo)
-        xinput_form.addRow("Clock toggle", self.clock_xinput_combo)
-        xinput_group.setLayout(xinput_form)
-        if not xinput_available:
-            xinput_group.setEnabled(False)
-            xinput_group.setToolTip("XInput is only available on Windows.")
+        gamepad_group = QGroupBox(gamepad_label or "Gamepad")
+        gamepad_form = QFormLayout()
+        gamepad_form.addRow("Start toggle", self.start_xinput_combo)
+        gamepad_form.addRow("Clock toggle", self.clock_xinput_combo)
+        gamepad_group.setLayout(gamepad_form)
+        if not gamepad_available:
+            gamepad_group.setEnabled(False)
+            gamepad_group.setToolTip(
+                "Gamepad support requires pygame (SDL) on macOS/Linux or XInput on Windows."
+            )
 
         buttons = QHBoxLayout()
         ok_btn = QPushButton("Save")
@@ -1174,7 +1288,7 @@ class HotkeySettingsDialog(QDialog):
 
         layout = QVBoxLayout()
         layout.addWidget(keyboard_group)
-        layout.addWidget(xinput_group)
+        layout.addWidget(gamepad_group)
         layout.addLayout(buttons)
         self.setLayout(layout)
         self.resize(420, 260)
@@ -2938,7 +3052,7 @@ class CountdownWindow(QMainWindow):
         self._year_total_anim = None
         self._start_shortcut = None
         self._clock_shortcut = None
-        self._xinput_reader = XInputReader()
+        self._xinput_reader = GamepadReader()
         self._xinput_timer = QTimer(self)
         self._xinput_timer.setInterval(50)
         self._xinput_timer.timeout.connect(self._poll_xinput)
@@ -3402,6 +3516,7 @@ class CountdownWindow(QMainWindow):
             self,
             HotkeySettings(**self.hotkey_settings.__dict__),
             self._xinput_reader.available,
+            self._xinput_reader.group_label,
         )
         if dialog.exec() != QDialog.Accepted:
             return
