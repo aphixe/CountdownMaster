@@ -32,6 +32,7 @@ PySide6 (Qt) and stores data locally in `data.csv` plus preferences in
 ## Screenshot
 
 ![Countdown Master Screenshot](screenshot.png)
+![Countdown Master Calendar View](cal-view.png)
 ![Countdown Master Log Screenshot](daily.png)
 ![Countdown Master Trends Screenshot](trends.png)
 ## Requirements
