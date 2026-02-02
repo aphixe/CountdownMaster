@@ -14,6 +14,7 @@ from PySide6.QtCore import (
     QPoint,
     QPointF,
     QPropertyAnimation,
+    QRect,
     QRectF,
     QSettings,
     Signal,
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QCalendarWidget,
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
@@ -407,7 +409,7 @@ DEFAULT_PROFILES = (
     ("Phonetic Training", "phonetic.csv"),
     ("Output", "output.csv"),
     ("Soroban", "soroban.csv"),
-    ("Anki", "anki.csv"),
+    ("Anki/Migaku", "anki.csv"),
 )
 DEFAULT_PROFILE_NAME = "Activate Immersion"
 PROFILE_ACTION_ADD = "__add_profile__"
@@ -430,6 +432,7 @@ CALENDAR_SCALE_MINUTES_MAX = 120
 CALENDAR_SCALE_HEIGHT_MIN = 20
 CALENDAR_SCALE_HEIGHT_MAX = 100
 CALENDAR_PROFILE_ALL = "__calendar_all_profiles__"
+LOGS_PROFILE_ALL = "__logs_all_profiles__"
 CALENDAR_DAY_PADDING = 4
 CALENDAR_BOTTOM_PADDING = 14
 
@@ -581,6 +584,7 @@ class AddTimeDialog(QDialog):
         minutes: int = 0,
         start_time: Optional[QTime] = None,
         title: str = "Add Time",
+        use_24h_time: bool = True,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -592,7 +596,9 @@ class AddTimeDialog(QDialog):
         self.minutes_spin.setRange(0, 59)
         self.minutes_spin.setValue(minutes)
         self.start_time_edit = QTimeEdit()
-        self.start_time_edit.setDisplayFormat("HH:mm")
+        self.start_time_edit.setDisplayFormat(
+            "HH:mm" if use_24h_time else "h:mm AP"
+        )
         if start_time is None:
             now = QTime.currentTime()
             start_time = QTime(now.hour(), now.minute(), 0)
@@ -1607,6 +1613,15 @@ class CalendarHeaderWidget(QWidget):
             CALENDAR_HEADER_HEIGHT - 1,
         )
 
+        today = QDate.currentDate()
+        if self._week_start <= today <= self._week_start.addDays(6):
+            day_idx = self._week_start.daysTo(today)
+            x = CALENDAR_LEFT_MARGIN + (day_idx * day_width)
+            border_rect = QRectF(x + 1, 1, day_width - 2, CALENDAR_HEADER_HEIGHT - 2)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#ef4444"), 2))
+            painter.drawRect(border_rect)
+
 
 class CalendarViewWidget(QWidget):
     def __init__(
@@ -1910,6 +1925,15 @@ class CalendarViewWidget(QWidget):
         for day_idx in range(8):
             x = self._left_margin + (day_idx * day_width)
             painter.drawLine(x, grid_top, x, grid_bottom)
+
+        today = QDate.currentDate()
+        if self._week_start <= today <= self._week_start.addDays(6):
+            day_idx = self._week_start.daysTo(today)
+            x = self._left_margin + (day_idx * day_width)
+            border_rect = QRectF(x + 1, grid_top + 1, day_width - 2, grid_bottom - 2)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#ef4444"), 2))
+            painter.drawRect(border_rect)
 
         painter.setFont(QFont(painter.font()))
         time_label_font = QFont(painter.font())
@@ -2861,42 +2885,79 @@ class GraphDialog(QDialog):
         self.graph.setFixedHeight(viewport_height)
 
 
+class LogsCalendarWidget(QCalendarWidget):
+    def paintCell(self, painter: QPainter, rect: QRect, date: QDate) -> None:
+        super().paintCell(painter, rect, date)
+        if date == QDate.currentDate():
+            painter.save()
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#ef4444"), 2))
+            painter.drawRect(rect.adjusted(1, 1, -1, -1))
+            painter.restore()
+
+
 class LogsDialog(QDialog):
     def __init__(
         self,
-        parent: QWidget,
+        parent: "CountdownWindow",
         entries: list[dict[str, object]],
         daily_goals: dict[str, int],
         fallback_goal_seconds: int,
         daily_totals: dict[str, int],
         ui_settings: UiSettings,
+        active_profile: str,
+        profile_labels: list[str],
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Daily Logs")
         self.setModal(True)
+        self._parent = parent
         self._entries = entries
         self._daily_goals = daily_goals
         self._fallback_goal_seconds = fallback_goal_seconds
         self._daily_totals = daily_totals
         self._settings = ui_settings
+        self._current_profile = active_profile
+        self._profile_labels = list(profile_labels)
+        self._profile_cache: dict[
+            str, tuple[list[dict[str, object]], dict[str, int], dict[str, int], int]
+        ] = {
+            active_profile: (
+                entries,
+                daily_totals,
+                daily_goals,
+                fallback_goal_seconds,
+            )
+        }
         self.resize(820, 520)
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.setMinimumWidth(180)
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.addItem("All Profiles", LOGS_PROFILE_ALL)
+        for label in self._profile_labels:
+            self.profile_combo.addItem(label, label)
+        self._restore_profile_selection(active_profile)
+        self.profile_combo.blockSignals(False)
 
         self.date_edit = QDateEdit(QDate.currentDate())
         self.date_edit.setCalendarPopup(True)
+        calendar = LogsCalendarWidget()
+        self.date_edit.setCalendarWidget(calendar)
         self.date_edit.dateChanged.connect(self._refresh_table)
 
         self.range_combo = QComboBox()
         self.range_combo.addItems(["Day", "Week (7 days)"])
         self.range_combo.currentIndexChanged.connect(self._refresh_table)
 
+        self.goto_today_btn = QPushButton("Go to Today")
+        self.goto_today_btn.clicked.connect(self._jump_to_today)
+
         self.goal_label = QLabel()
         self.week_total_label = QLabel()
         self.week_total_label.setVisible(False)
 
         self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(
-            ["Date", "Started", "Paused", "Duration", "% Goal"]
-        )
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionMode(QTableWidget.NoSelection)
@@ -2905,11 +2966,16 @@ class LogsDialog(QDialog):
         header.setStretchLastSection(True)
 
         controls = QHBoxLayout()
+        controls.addWidget(QLabel("Profile"))
+        controls.addWidget(self.profile_combo)
+        controls.addSpacing(12)
         controls.addWidget(QLabel("Date"))
         controls.addWidget(self.date_edit)
         controls.addSpacing(12)
         controls.addWidget(QLabel("Range"))
         controls.addWidget(self.range_combo)
+        controls.addSpacing(12)
+        controls.addWidget(self.goto_today_btn)
         controls.addStretch(1)
 
         close_btn = QPushButton("Close")
@@ -2927,21 +2993,144 @@ class LogsDialog(QDialog):
         layout.addLayout(footer)
         self.setLayout(layout)
 
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+        self._sync_selected_profile()
         self._refresh_table()
 
+    def _load_profile_data(
+        self, label: str
+    ) -> tuple[list[dict[str, object]], dict[str, int], dict[str, int], int]:
+        cached = self._profile_cache.get(label)
+        if cached is not None:
+            return cached
+        path = self._parent._profile_file_path(label)
+        fallback_goal = self._parent._load_profile_super_goal_seconds(label)
+        entries, totals, goals = self._parent._load_log_entries_from_path(
+            path, fallback_goal_seconds=fallback_goal
+        )
+        cached = (entries, totals, goals, fallback_goal)
+        self._profile_cache[label] = cached
+        return cached
+
+    def _load_all_profile_data(
+        self,
+    ) -> tuple[list[dict[str, object]], dict[str, int]]:
+        cached = self._profile_cache.get(LOGS_PROFILE_ALL)
+        if cached is not None:
+            entries, totals, _, _ = cached
+            return entries, totals
+        combined_entries: list[dict[str, object]] = []
+        combined_totals: dict[str, int] = {}
+        for label in self._profile_labels:
+            entries, totals, _, _ = self._load_profile_data(label)
+            for entry in entries:
+                tagged = dict(entry)
+                tagged["profile_label"] = label
+                combined_entries.append(tagged)
+            for date_key, total in totals.items():
+                combined_totals[date_key] = combined_totals.get(date_key, 0) + total
+        cached = (combined_entries, combined_totals, {}, 0)
+        self._profile_cache[LOGS_PROFILE_ALL] = cached
+        return combined_entries, combined_totals
+
+    def _restore_profile_selection(self, fallback: str) -> None:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        saved = settings.value("logs/selected_profile", "")
+        if isinstance(saved, str) and saved:
+            index = self.profile_combo.findData(saved)
+            if index >= 0:
+                self.profile_combo.setCurrentIndex(index)
+                return
+        active_index = self.profile_combo.findData(fallback)
+        if active_index >= 0:
+            self.profile_combo.setCurrentIndex(active_index)
+
+    def _save_profile_selection(self) -> None:
+        settings = QSettings("settings.ini", QSettings.IniFormat)
+        value = self.profile_combo.currentData()
+        if value is None:
+            return
+        settings.setValue("logs/selected_profile", str(value))
+        settings.sync()
+
+    def _apply_profile_selection(self, data: str, *, save: bool) -> None:
+        if data == self._current_profile:
+            return
+        if data == LOGS_PROFILE_ALL:
+            entries, totals = self._load_all_profile_data()
+            self._current_profile = data
+            self._entries = entries
+            self._daily_totals = totals
+            self._daily_goals = {}
+            self._fallback_goal_seconds = 0
+        else:
+            entries, totals, goals, fallback_goal = self._load_profile_data(data)
+            self._current_profile = data
+            self._entries = entries
+            self._daily_totals = totals
+            self._daily_goals = goals
+            self._fallback_goal_seconds = fallback_goal
+        if save:
+            self._save_profile_selection()
+        self._refresh_table()
+
+    def _sync_selected_profile(self) -> None:
+        data = self.profile_combo.currentData()
+        if not isinstance(data, str):
+            return
+        self._apply_profile_selection(data, save=False)
+
+    def _jump_to_today(self) -> None:
+        self.date_edit.setDate(QDate.currentDate())
+        QTimer.singleShot(0, self._scroll_to_today)
+
+    def _scroll_to_today(self) -> None:
+        if self.table.rowCount() <= 0:
+            return
+        today_key = QDate.currentDate().toString("yyyy-MM-dd")
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None and item.text() == today_key:
+                self.table.scrollToItem(item)
+                return
+
+    def _on_profile_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        data = self.profile_combo.itemData(index)
+        if not isinstance(data, str):
+            return
+        self._apply_profile_selection(data, save=True)
+
     def _goal_seconds_for_date(self, date_key: str) -> int:
+        if self._current_profile == LOGS_PROFILE_ALL:
+            return 0
         return self._daily_goals.get(date_key, self._fallback_goal_seconds)
 
     def _refresh_table(self) -> None:
-        selected_date = self.date_edit.date()
-        date_key = selected_date.toString("yyyy-MM-dd")
-        goal_seconds = self._goal_seconds_for_date(date_key)
-        if goal_seconds > 0:
-            self.goal_label.setText(
-                f"Daily super goal: {format_duration_hms(goal_seconds)}"
+        show_profile = self._current_profile == LOGS_PROFILE_ALL
+        if show_profile:
+            self.table.setColumnCount(6)
+            self.table.setHorizontalHeaderLabels(
+                ["Date", "Profile", "Started", "Paused", "Duration", "% Goal"]
             )
         else:
-            self.goal_label.setText("Daily super goal: not set")
+            self.table.setColumnCount(5)
+            self.table.setHorizontalHeaderLabels(
+                ["Date", "Started", "Paused", "Duration", "% Goal"]
+            )
+        selected_date = self.date_edit.date()
+        date_key = selected_date.toString("yyyy-MM-dd")
+        if self._current_profile == LOGS_PROFILE_ALL:
+            self.goal_label.setText("Daily super goal: varies by profile")
+        else:
+            goal_seconds = self._goal_seconds_for_date(date_key)
+            if goal_seconds > 0:
+                self.goal_label.setText(
+                    f"Daily super goal: {format_duration_hms(goal_seconds)}"
+                )
+            else:
+                self.goal_label.setText("Daily super goal: not set")
         range_mode = self.range_combo.currentText().lower()
         if range_mode.startswith("week"):
             start_date = selected_date
@@ -2980,14 +3169,35 @@ class LogsDialog(QDialog):
             duration_seconds = int(entry["duration_seconds"])
             duration = format_duration_hms(duration_seconds)
             entry_date_key = str(entry.get("date", ""))
-            entry_goal_seconds = self._goal_seconds_for_date(entry_date_key)
+            if self._current_profile == LOGS_PROFILE_ALL:
+                entry_goal_seconds = int(entry.get("goal_seconds", 0) or 0)
+            else:
+                entry_goal_seconds = self._goal_seconds_for_date(entry_date_key)
             percent = format_percent(duration_seconds, entry_goal_seconds)
             start_time = entry.get("start_time") or "N/A"
             end_time = entry.get("end_time") or "N/A"
-            values = [entry["date"], start_time, end_time, duration, percent]
+            if show_profile:
+                values = [
+                    entry["date"],
+                    entry.get("profile_label", "Unknown"),
+                    start_time,
+                    end_time,
+                    duration,
+                    percent,
+                ]
+            else:
+                values = [entry["date"], start_time, end_time, duration, percent]
+            row_color = None
+            if show_profile:
+                label = entry.get("profile_label")
+                if isinstance(label, str) and label:
+                    row_color = QColor(self._parent._profile_color(label))
+                    row_color.setAlpha(40)
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setFlags(Qt.ItemIsEnabled)
+                if row_color is not None:
+                    item.setBackground(QBrush(row_color))
                 self.table.setItem(row_idx, col, item)
 
 class CountdownWindow(QMainWindow):
@@ -3344,7 +3554,7 @@ class CountdownWindow(QMainWindow):
         self.status_label.setText("Goal time set")
 
     def _open_add_time(self) -> None:
-        dialog = AddTimeDialog(self)
+        dialog = AddTimeDialog(self, use_24h_time=self.settings.use_24h_time)
         if dialog.exec() != QDialog.Accepted:
             return
         hours = dialog.hours_spin.value()
@@ -3447,6 +3657,8 @@ class CountdownWindow(QMainWindow):
             self.super_goal_seconds,
             self.daily_totals,
             self.settings,
+            self._active_profile,
+            self._profile_labels(),
         )
         dialog.exec()
 
