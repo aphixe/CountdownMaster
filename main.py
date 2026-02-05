@@ -3285,7 +3285,10 @@ class CountdownWindow(QMainWindow):
         self._window_save_timer.setSingleShot(True)
         self._window_save_timer.setInterval(250)
         self._window_save_timer.timeout.connect(self._save_window_geometry)
+        self._connected_screens = set()
         self._restore_window_geometry()
+        self._ensure_window_visible()
+        self._connect_screen_signals()
         self._goal_pulse_anim = QVariantAnimation(self)
         self._goal_pulse_anim.setDuration(2000)
         self._goal_pulse_anim.setEasingCurve(QEasingCurve.InOutSine)
@@ -5355,6 +5358,51 @@ class CountdownWindow(QMainWindow):
         pos_y = self._read_int_setting(settings, "window/y", None)
         if pos_x is not None and pos_y is not None:
             self.move(pos_x, pos_y)
+
+    def _connect_screen_signals(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.screenAdded.connect(self._on_screen_added)
+        app.screenRemoved.connect(self._on_screen_removed)
+        for screen in app.screens():
+            self._attach_screen_signals(screen)
+
+    def _attach_screen_signals(self, screen) -> None:
+        if screen in self._connected_screens:
+            return
+        self._connected_screens.add(screen)
+        screen.availableGeometryChanged.connect(self._ensure_window_visible)
+        screen.geometryChanged.connect(self._ensure_window_visible)
+
+    def _on_screen_added(self, screen) -> None:
+        self._attach_screen_signals(screen)
+        self._ensure_window_visible()
+
+    def _on_screen_removed(self, screen) -> None:
+        if screen in self._connected_screens:
+            self._connected_screens.remove(screen)
+        self._ensure_window_visible()
+
+    def _ensure_window_visible(self) -> None:
+        screens = QApplication.screens()
+        if not screens:
+            return
+        window_rect = self.frameGeometry()
+        for screen in screens:
+            if screen.availableGeometry().intersects(window_rect):
+                return
+        primary = QApplication.primaryScreen() or screens[0]
+        available = primary.availableGeometry()
+        width = min(self.width(), available.width())
+        height = min(self.height(), available.height())
+        width = max(width, self.minimumWidth())
+        height = max(height, self.minimumHeight())
+        self.resize(width, height)
+        x = available.x() + max(0, (available.width() - self.width()) // 2)
+        y = available.y() + max(0, (available.height() - self.height()) // 2)
+        self.move(x, y)
+        self._save_window_geometry()
 
     def _save_window_geometry(self) -> None:
         settings = QSettings("settings.ini", QSettings.IniFormat)
