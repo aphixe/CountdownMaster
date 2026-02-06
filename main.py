@@ -3,6 +3,7 @@ import ctypes
 import math
 import logging
 import os
+import shutil
 import sys
 from typing import Optional
 from dataclasses import dataclass, field
@@ -77,6 +78,55 @@ try:
     from PySide6.QtWidgets import QMacVisualEffect
 except Exception:
     QMacVisualEffect = None
+
+APP_NAME = "Countdown Master"
+DATA_DIR: Optional[str] = None
+SETTINGS_PATH = "settings.ini"
+
+
+def resolve_data_dir() -> str:
+    if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            home = os.path.expanduser("~")
+            base = os.path.join(
+                home,
+                "Library",
+                "Application Support",
+                APP_NAME,
+            )
+        else:
+            base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def init_paths() -> None:
+    global DATA_DIR, SETTINGS_PATH
+    if DATA_DIR is None:
+        DATA_DIR = resolve_data_dir()
+    SETTINGS_PATH = os.path.join(DATA_DIR, "settings.ini")
+    if os.path.exists(SETTINGS_PATH):
+        return
+    legacy_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.ini"),
+        os.path.join(os.getcwd(), "settings.ini"),
+    ]
+    for legacy_path in legacy_paths:
+        if legacy_path == SETTINGS_PATH or not os.path.exists(legacy_path):
+            continue
+        try:
+            shutil.copy2(legacy_path, SETTINGS_PATH)
+        except Exception:
+            pass
+        break
+
+
+def get_settings() -> QSettings:
+    if SETTINGS_PATH == "settings.ini" and DATA_DIR is None:
+        init_paths()
+    return QSettings(SETTINGS_PATH, QSettings.IniFormat)
 
 @dataclass
 class UiSettings:
@@ -2189,7 +2239,7 @@ class CalendarViewDialog(QDialog):
         self._update_calendar_width()
 
     def _restore_scale_selection(self) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         saved = settings.value("calendar/scale_minutes", None)
         if isinstance(saved, str) and saved:
             try:
@@ -2206,7 +2256,7 @@ class CalendarViewDialog(QDialog):
         self.scale_slider.setValue(self._scale_options.index(15))
 
     def _save_scale_selection(self) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         minutes = self._scale_options[self.scale_slider.value()]
         settings.setValue("calendar/scale_minutes", int(minutes))
         settings.sync()
@@ -2309,7 +2359,7 @@ class CalendarViewDialog(QDialog):
         self._save_profile_selection()
 
     def _restore_profile_selection(self) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         saved = settings.value("calendar/selected_profile", "")
         if isinstance(saved, str) and saved:
             index = self.profile_combo.findData(saved)
@@ -2321,7 +2371,7 @@ class CalendarViewDialog(QDialog):
             self.profile_combo.setCurrentIndex(active_index)
 
     def _save_profile_selection(self) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         value = self.profile_combo.currentData()
         if value is None:
             return
@@ -3034,7 +3084,7 @@ class LogsDialog(QDialog):
         return combined_entries, combined_totals
 
     def _restore_profile_selection(self, fallback: str) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         saved = settings.value("logs/selected_profile", "")
         if isinstance(saved, str) and saved:
             index = self.profile_combo.findData(saved)
@@ -3046,7 +3096,7 @@ class LogsDialog(QDialog):
             self.profile_combo.setCurrentIndex(active_index)
 
     def _save_profile_selection(self) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         value = self.profile_combo.currentData()
         if value is None:
             return
@@ -3210,7 +3260,8 @@ class CountdownWindow(QMainWindow):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
 
-        self._data_dir = os.path.dirname(__file__)
+        init_paths()
+        self._data_dir = DATA_DIR or resolve_data_dir()
         self.settings = self._load_settings()
         self.hotkey_settings = self._load_hotkey_settings()
         self._default_profile_files = {label: fname for label, fname in DEFAULT_PROFILES}
@@ -4631,7 +4682,7 @@ class CountdownWindow(QMainWindow):
         self._update_total_today_label()
 
     def _load_settings(self) -> UiSettings:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         ui = UiSettings()
         ui.blur_radius = int(settings.value("blur/radius", ui.blur_radius))
         ui.opacity = float(settings.value("blur/opacity", ui.opacity))
@@ -4846,7 +4897,7 @@ class CountdownWindow(QMainWindow):
         return ui
 
     def _load_hotkey_settings(self) -> HotkeySettings:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         hotkeys = HotkeySettings()
         hotkeys.start_hotkey = str(
             settings.value("hotkeys/start", hotkeys.start_hotkey) or ""
@@ -4868,7 +4919,7 @@ class CountdownWindow(QMainWindow):
         self, settings: Optional[QSettings] = None
     ) -> int:
         if settings is None:
-            settings = QSettings("settings.ini", QSettings.IniFormat)
+            settings = get_settings()
         hours = self._read_int_setting(settings, "super_goal/hours", 2) or 0
         minutes = self._read_int_setting(settings, "super_goal/minutes", 0) or 0
         return max(0, hours * 3600 + minutes * 60)
@@ -4885,7 +4936,7 @@ class CountdownWindow(QMainWindow):
         return f"super_goal/profiles/{self._profile_super_goal_key(label)}"
 
     def _load_profile_super_goal_seconds(self, label: str) -> int:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         base = self._profile_super_goal_settings_base(label)
         hours_key = f"{base}/hours"
         minutes_key = f"{base}/minutes"
@@ -4909,7 +4960,7 @@ class CountdownWindow(QMainWindow):
         sync: bool = True,
     ) -> None:
         if settings is None:
-            settings = QSettings("settings.ini", QSettings.IniFormat)
+            settings = get_settings()
         total = max(0, int(seconds))
         base = self._profile_super_goal_settings_base(label)
         settings.setValue(f"{base}/hours", total // 3600)
@@ -4918,7 +4969,7 @@ class CountdownWindow(QMainWindow):
             settings.sync()
 
     def _clear_profile_super_goal(self, label: str) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         settings.remove(self._profile_super_goal_settings_base(label))
         settings.sync()
 
@@ -5049,7 +5100,7 @@ class CountdownWindow(QMainWindow):
         return self._palette_profile_color(label)
 
     def _load_profile_colors(self) -> dict[str, QColor]:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         colors: dict[str, QColor] = {}
         for label in self._profile_labels():
             key = self._profile_color_key(label)
@@ -5064,13 +5115,13 @@ class CountdownWindow(QMainWindow):
         if not color.isValid():
             return
         self._profile_colors[label] = color
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         settings.setValue(self._profile_color_key(label), qcolor_to_hex(color))
         settings.sync()
 
     def _clear_profile_color(self, label: str) -> None:
         self._profile_colors.pop(label, None)
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         settings.remove(self._profile_color_key(label))
         settings.sync()
 
@@ -5141,7 +5192,7 @@ class CountdownWindow(QMainWindow):
             return fallback
 
     def _load_custom_profiles(self) -> list[str]:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         value = settings.value("profiles/custom", [])
         if isinstance(value, str):
             raw = [item.strip() for item in value.split("|")]
@@ -5166,7 +5217,7 @@ class CountdownWindow(QMainWindow):
         return labels
 
     def _load_active_profile(self) -> str:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         active = settings.value("profiles/active", DEFAULT_PROFILE_NAME)
         if not isinstance(active, str):
             active = DEFAULT_PROFILE_NAME
@@ -5176,7 +5227,7 @@ class CountdownWindow(QMainWindow):
         return active
 
     def _save_profile_settings(self) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         settings.setValue("profiles/active", self._active_profile)
         settings.setValue("profiles/custom", self._custom_profiles)
         settings.sync()
@@ -5346,7 +5397,7 @@ class CountdownWindow(QMainWindow):
         self._save_profile_settings()
 
     def _restore_window_geometry(self) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         self.setMinimumSize(self._visibility_minimum_size())
         width = self._read_int_setting(settings, "window/width", None)
         height = self._read_int_setting(settings, "window/height", None)
@@ -5405,7 +5456,7 @@ class CountdownWindow(QMainWindow):
         self._save_window_geometry()
 
     def _save_window_geometry(self) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         rect = self.geometry()
         settings.setValue("window/x", rect.x())
         settings.setValue("window/y", rect.y())
@@ -5419,7 +5470,7 @@ class CountdownWindow(QMainWindow):
         self._window_save_timer.start()
 
     def _save_settings(self) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         settings.setValue("blur/radius", self.settings.blur_radius)
         settings.setValue("blur/opacity", self.settings.opacity)
         settings.setValue("colors/background", qcolor_to_hex(self.settings.bg_color))
@@ -5518,7 +5569,7 @@ class CountdownWindow(QMainWindow):
         settings.sync()
 
     def _save_hotkey_settings(self) -> None:
-        settings = QSettings("settings.ini", QSettings.IniFormat)
+        settings = get_settings()
         settings.setValue("hotkeys/start", self.hotkey_settings.start_hotkey)
         settings.setValue("hotkeys/clock", self.hotkey_settings.clock_hotkey)
         settings.setValue(
@@ -5812,12 +5863,16 @@ class CountdownWindow(QMainWindow):
 
 
 def main() -> None:
-    log_path = os.path.join(os.path.dirname(__file__), "debug.log")
-    setup_logging(log_path)
-    sys.excepthook = log_unhandled_exception
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(APP_NAME)
     app.setQuitOnLastWindowClosed(True)
     app.setStyle("Fusion")
+    init_paths()
+    data_dir = DATA_DIR or resolve_data_dir()
+    log_path = os.path.join(data_dir, "debug.log")
+    setup_logging(log_path)
+    sys.excepthook = log_unhandled_exception
     window = CountdownWindow()
     window.show()
     sys.exit(app.exec())
