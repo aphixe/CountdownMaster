@@ -14,6 +14,7 @@ PySide6 (Qt) and stores data locally in `data.csv` plus preferences in
 
 ## Features
 
+- (new) Added achivements and Add or delete, undo, label time blocks inside calendar view
 - (New) Add support for Linux and mac for gamepad support using pygame (if you have old version re-run requirements)
 - (Change) Reordered the right click menu
 - (NEW) Added Calendar View, shows time blocks
