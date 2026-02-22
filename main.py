@@ -38,6 +38,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QShortcut,
+    QShowEvent,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -54,7 +55,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QPushButton,
+
     QSlider,
     QSpinBox,
     QStackedLayout,
@@ -72,6 +75,9 @@ from PySide6.QtWidgets import (
     QTimeEdit,
     QInputDialog,
     QKeySequenceEdit,
+    QGraphicsOpacityEffect,
+    QLineEdit,
+    QDialogButtonBox,
 )
 
 try:
@@ -154,6 +160,7 @@ class UiSettings:
     graph_dot_color: QColor = field(default_factory=lambda: QColor("#ebb6e8"))
     graph_fill_color: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
     graph_grid_color: QColor = field(default_factory=lambda: QColor("#94a3b8"))
+    graph_range_date_format: str = "mm/dd/yy"
     total_today_color: QColor = field(default_factory=lambda: QColor("#94a3b8"))
     total_today_font_size: int = 10
     goal_left_color: QColor = field(default_factory=lambda: QColor("#6dd3fb"))
@@ -198,6 +205,29 @@ class GraphSeries:
     fill_color: QColor
 
 
+@dataclass
+class Achievement:
+    id: str
+    label: str
+    happy: str
+    days: int = 0
+
+
+ACHIEVEMENT_DEFINITIONS = [
+    Achievement("streak_7", "7 days", "😊", 7),
+    Achievement("streak_14", "14 days and still strong", "💪😊", 14),
+    Achievement("streak_30", "30 days your a month in", "📅😊", 30),
+    Achievement("streak_50", "50 days, wow your getting lots of days in", "🌟😊", 50),
+    Achievement("streak_100", "100 days wow thats amazing", "💯😊", 100),
+    Achievement("streak_365", "365 you did a year, happy new year", "🎆😊", 365),
+    Achievement("streak_547", "18 months, you must be nearing great understanding", "🧠😊", 547),
+    Achievement("streak_730", "2 year wow your a rockstar", "🎸😊", 730),
+    Achievement("streak_2555", "7 years your godlike", "⚡😊", 2555),
+    Achievement("missed_day", "Oops you missed a day", "😢💔"),
+    Achievement("back_on_track", "Gotten back on track", "🌈😊"),
+]
+
+
 @dataclass(frozen=True)
 class CalendarBlock:
     day_index: int
@@ -206,6 +236,8 @@ class CalendarBlock:
     label: str
     color: QColor
     profile_label: str
+    user_label: str = ""
+    entry_index: int = -1
 
 
 XINPUT_BUTTONS = {
@@ -461,6 +493,14 @@ DEFAULT_PROFILES = (
     ("Soroban", "soroban.csv"),
     ("Anki/Migaku", "anki.csv"),
 )
+
+def _ensure_data_file_path(self, path: str) -> None:
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                ["date", "start_time", "end_time", "duration_seconds", "goal_seconds", "label"]
+            )
 DEFAULT_PROFILE_NAME = "Activate Immersion"
 PROFILE_ACTION_ADD = "__add_profile__"
 PROFILE_ACTION_DELETE = "__delete_profile__"
@@ -802,6 +842,20 @@ class SettingsDialog(QDialog):
         self.graph_dot_btn = QPushButton()
         self.graph_fill_btn = QPushButton()
         self.graph_grid_btn = QPushButton()
+        self.graph_range_format_combo = QComboBox()
+        range_formats = [
+            ("MM/DD/YY", "mm/dd/yy"),
+            ("YY/MM/DD", "yy/mm/dd"),
+            ("DD/MM/YY", "dd/mm/yy"),
+        ]
+        for label, value in range_formats:
+            self.graph_range_format_combo.addItem(label, value)
+        range_index = self.graph_range_format_combo.findData(
+            ui_settings.graph_range_date_format
+        )
+        if range_index < 0:
+            range_index = 0
+        self.graph_range_format_combo.setCurrentIndex(range_index)
         self.total_today_btn = QPushButton()
         self.goal_left_btn = QPushButton()
         self.super_goal_bar_start_btn = QPushButton()
@@ -919,6 +973,7 @@ class SettingsDialog(QDialog):
         graph_colors_form.addRow("Dots", self.graph_dot_btn)
         graph_colors_form.addRow("Fill Gradient", self.graph_fill_btn)
         graph_colors_form.addRow("Grid/Ticks", self.graph_grid_btn)
+        graph_colors_form.addRow("Range Label Format", self.graph_range_format_combo)
         graph_colors_group.setLayout(graph_colors_form)
 
         ui_layout.addWidget(_make_heading("Window and Typography"))
@@ -1146,6 +1201,9 @@ class SettingsDialog(QDialog):
             graph_dot_color=self._settings.graph_dot_color,
             graph_fill_color=self._settings.graph_fill_color,
             graph_grid_color=self._settings.graph_grid_color,
+            graph_range_date_format=str(
+                self.graph_range_format_combo.currentData()
+            ),
             total_today_color=self._settings.total_today_color,
             total_today_font_size=self.total_today_font_spin.value(),
             goal_left_color=self._settings.goal_left_color,
@@ -1674,6 +1732,11 @@ class CalendarHeaderWidget(QWidget):
 
 
 class CalendarViewWidget(QWidget):
+    labelChanged = Signal(int, str)
+    blockDeleteRequested = Signal(int)
+    undoRequested = Signal()
+    addBlockRequested = Signal(QDate, QTime)
+
     def __init__(
         self,
         ui_settings: UiSettings,
@@ -1699,6 +1762,8 @@ class CalendarViewWidget(QWidget):
         self.setMinimumWidth(self._left_margin + (self._min_day_width * 7))
         self.setMouseTracking(True)
         self._update_geometry()
+        self.undo_available = False
+
 
     def set_entries(
         self,
@@ -1862,6 +1927,8 @@ class CalendarViewWidget(QWidget):
                     label=label,
                     color=color,
                     profile_label=profile_label,
+                    user_label=entry.get("label", ""),
+                    entry_index=idx,
                 )
             )
         self._blocks.sort(key=lambda block: (block.day_index, block.start_seconds))
@@ -2024,6 +2091,17 @@ class CalendarViewWidget(QWidget):
                     Qt.AlignLeft | Qt.AlignTop,
                     block.label,
                 )
+                if block.user_label and block_height >= 36:
+                    bold_font = QFont(painter.font())
+                    bold_font.setBold(True)
+                    painter.setFont(bold_font)
+                    painter.drawText(
+                        rect,
+                        Qt.AlignCenter,
+                        block.user_label,
+                    )
+                    bold_font.setBold(False)
+                    painter.setFont(bold_font)
 
         today = QDate.currentDate()
         if self._week_start <= today <= self._week_start.addDays(6):
@@ -2090,17 +2168,159 @@ class CalendarViewWidget(QWidget):
             QToolTip.hideText()
             return
         seconds = hovered.end_seconds - hovered.start_seconds
-        tooltip = self._format_duration_seconds(seconds)
+        duration_text = self._format_duration_seconds(seconds)
+        parts = []
+        if hovered.user_label:
+            parts.append(f"Label: {hovered.user_label}")
         if hovered.profile_label:
-            text = f"{hovered.profile_label}\nTotal: {tooltip}"
-        else:
-            text = f"Total: {tooltip}"
-        QToolTip.showText(event.globalPos(), text, self)
+            parts.append(f"Profile: {hovered.profile_label}")
+        parts.append(f"Duration: {duration_text}")
+        text = "\n".join(parts)
+        QToolTip.showText(event.globalPosition().toPoint(), text, self)
 
     def leaveEvent(self, event) -> None:
         self._hover_block = None
         QToolTip.hideText()
         super().leaveEvent(event)
+
+    def contextMenuEvent(self, event) -> None:
+        pos = event.pos()
+        clicked_block = None
+        for block in self._blocks:
+            if self._block_rect(block).contains(pos):
+                clicked_block = block
+                break
+
+        if clicked_block:
+            menu = QMenu(self)
+            label_action = menu.addAction("Label")
+            remove_action = menu.addAction("Remove Label")
+            remove_action.setEnabled(bool(clicked_block.user_label))
+            
+            delete_action = menu.addAction("Delete Block")
+            
+            menu.addSeparator()
+            undo_action = menu.addAction("Undo Last Delete")
+            undo_action.setEnabled(self.undo_available)
+            
+            add_block_action = menu.addAction("Add Block")
+            
+            action = menu.exec(event.globalPos())
+            if action == label_action:
+                new_label, ok = QInputDialog.getText(
+                    self,
+                    "Add Label",
+                    "Enter label for this time block:",
+                    text=clicked_block.user_label,
+                )
+                if ok:
+                    self.labelChanged.emit(clicked_block.entry_index, new_label)
+            elif action == remove_action:
+                self.labelChanged.emit(clicked_block.entry_index, "")
+            elif action == delete_action:
+                self.blockDeleteRequested.emit(clicked_block.entry_index)
+            elif action == undo_action:
+                self.undoRequested.emit()
+            elif action == add_block_action:
+                self._emit_add_block(pos)
+        else:
+            # If nothing clicked, still allow undo and add block in empty space
+            menu = QMenu(self)
+            undo_action = menu.addAction("Undo Last Delete")
+            undo_action.setEnabled(self.undo_available)
+            add_block_action = menu.addAction("Add Block")
+            
+            action = menu.exec(event.globalPos())
+            if action == undo_action:
+                self.undoRequested.emit()
+            elif action == add_block_action:
+                self._emit_add_block(pos)
+
+    def _emit_add_block(self, pos: QPoint) -> None:
+        day_width = self._day_width()
+        pixels_per_minute = self._pixels_per_minute()
+        
+        day_idx = int((pos.x() - self._left_margin) // day_width)
+        day_idx = max(0, min(6, day_idx))
+        target_date = self._week_start.addDays(day_idx)
+        
+        minute = int(pos.y() / pixels_per_minute)
+        # Round to nearest 15 minutes for convenience
+        minute = (minute // 15) * 15
+        minute = max(0, min(24 * 60 - 15, minute))
+        target_time = QTime(0, 0).addSecs(minute * 60)
+        
+        self.addBlockRequested.emit(target_date, target_time)
+
+
+class ToastNotification(QWidget):
+    def __init__(self, title: str, message: str, parent: Optional[QWidget] = None) -> None:
+        QWidget.__init__(self, parent, Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+        layout = QVBoxLayout()
+        self.frame = QFrame()
+        self.frame.setObjectName("ToastFrame")
+        self.frame.setStyleSheet("""
+            #ToastFrame {
+                background-color: rgba(40, 40, 40, 230);
+                border: 1px solid rgba(255, 255, 255, 50);
+                border-radius: 10px;
+            }
+            QLabel {
+                color: white;
+            }
+        """)
+        frame_layout = QVBoxLayout(self.frame)
+
+        title_label = QLabel(title)
+        title_label.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        frame_layout.addWidget(title_label)
+
+        msg_label = QLabel(message)
+        msg_label.setFont(QFont("Segoe UI", 10))
+        msg_label.setWordWrap(True)
+        frame_layout.addWidget(msg_label)
+
+        layout.addWidget(self.frame)
+        self.setLayout(layout)
+
+        self.opacity_effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self.opacity_effect)
+        self.opacity_effect.setOpacity(0.0)
+
+        self.animation = QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.animation.setDuration(500)
+        self.animation.finished.connect(self._on_animation_finished)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide_toast)
+
+        self.adjustSize()
+        self.setFixedSize(self.size())
+
+    def show_toast(self) -> None:
+        # Position in bottom right corner
+        screen = QApplication.primaryScreen().availableGeometry()
+        x = screen.width() - self.width() - 20
+        y = screen.height() - self.height() - 20
+        self.move(x, y)
+        self.show()
+        self.animation.setStartValue(0.0)
+        self.animation.setEndValue(1.0)
+        self.animation.start()
+        self._timer.start(5000)
+
+    def hide_toast(self) -> None:
+        self.animation.setStartValue(1.0)
+        self.animation.setEndValue(0.0)
+        self.animation.start()
+
+    def _on_animation_finished(self) -> None:
+        if self.opacity_effect.opacity() == 0.0:
+            self.close()
 
 
 class CalendarViewDialog(QDialog):
@@ -2127,6 +2347,7 @@ class CalendarViewDialog(QDialog):
         self.prev_week_btn = QPushButton("Prev")
         self.next_week_btn = QPushButton("Next")
         self.today_btn = QPushButton("This Week")
+        self.now_btn = QPushButton("Now")
 
         self.scale_label = QLabel()
         self.scale_slider = QSlider(Qt.Horizontal)
@@ -2163,6 +2384,7 @@ class CalendarViewDialog(QDialog):
         controls.addWidget(self.week_label)
         controls.addWidget(self.next_week_btn)
         controls.addWidget(self.today_btn)
+        controls.addWidget(self.now_btn)
         controls.addStretch(1)
         controls.addWidget(QLabel("Scale"))
         controls.addWidget(self.scale_slider)
@@ -2187,6 +2409,7 @@ class CalendarViewDialog(QDialog):
         self.prev_week_btn.clicked.connect(lambda: self._shift_week(-7))
         self.next_week_btn.clicked.connect(lambda: self._shift_week(7))
         self.today_btn.clicked.connect(self._jump_to_current_week)
+        self.now_btn.clicked.connect(self._on_now_clicked)
         self.scale_slider.valueChanged.connect(self._sync_scale_label)
         self.scale_slider.valueChanged.connect(self._sync_calendar_scale)
         self.scroll_area.horizontalScrollBar().valueChanged.connect(
@@ -2202,6 +2425,104 @@ class CalendarViewDialog(QDialog):
         self._now_timer.setInterval(30000)
         self._now_timer.timeout.connect(self.calendar_widget.update)
         self._now_timer.start()
+
+        self.calendar_widget.labelChanged.connect(self._on_calendar_label_changed)
+        self.calendar_widget.blockDeleteRequested.connect(self._on_calendar_delete_requested)
+        self.calendar_widget.undoRequested.connect(self._on_undo_requested)
+        self.calendar_widget.addBlockRequested.connect(self._on_add_block_requested)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        # Small delay to ensure layout and scroll area are ready
+        QTimer.singleShot(50, self._jump_to_current_time)
+
+    def _jump_to_current_time(self) -> None:
+        now = QTime.currentTime()
+        minutes = now.hour() * 60 + now.minute()
+        ppm = self.calendar_widget._pixels_per_minute()
+        y = int(minutes * ppm)
+        
+        # Center in viewport
+        viewport_height = self.scroll_area.viewport().height()
+        target_y = y - (viewport_height // 2)
+        
+        # Clamp to scroll range
+        vbar = self.scroll_area.verticalScrollBar()
+        target_y = max(vbar.minimum(), min(vbar.maximum(), target_y))
+        vbar.setValue(target_y)
+
+    def _on_now_clicked(self) -> None:
+        self._jump_to_current_week()
+        self._jump_to_current_time()
+
+    def _on_add_block_requested(self, date: QDate, time: QTime) -> None:
+        profiles = self._parent._profile_labels()
+        active = self._parent._active_profile
+        dialog = AddBlockDialog(self, profiles, active, date, time, self._settings)
+        if dialog.exec() == QDialog.Accepted:
+            data = dialog.get_data()
+            self._parent._add_manual_log_entry(
+                str(data["profile"]),
+                data["date"],  # type: ignore
+                data["start_time"],  # type: ignore
+                int(data["duration"]),
+                str(data["label"]),
+            )
+            self._entries_by_profile.clear()
+            self._sync_calendar()
+
+    def _on_undo_requested(self) -> None:
+        self._parent._undo_delete_log_entry()
+        self._entries_by_profile.clear()
+        self._sync_calendar()
+
+    def _on_calendar_delete_requested(self, entry_index: int) -> None:
+        profile_data = self.profile_combo.currentData()
+        if profile_data == CALENDAR_PROFILE_ALL:
+            entries, _, labels = self._load_all_profile_entries()
+            if 0 <= entry_index < len(entries):
+                profile = labels[entry_index]
+                entry = entries[entry_index]
+            else:
+                return
+        else:
+            profile = str(profile_data)
+            entries = self._load_entries_for_profile(profile)
+            if 0 <= entry_index < len(entries):
+                entry = entries[entry_index]
+            else:
+                return
+
+        res = QMessageBox.question(
+            self,
+            "Delete Block",
+            f"Are you sure you want to delete this block from profile '{profile}'?\n\n"
+            f"This will remove the entry from the logs forever.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if res == QMessageBox.Yes:
+            self._parent._delete_log_entry(profile, entry)
+            self._entries_by_profile.clear()
+            self._sync_calendar()
+
+    def _on_calendar_label_changed(self, entry_index: int, new_label: str) -> None:
+
+        profile_data = self.profile_combo.currentData()
+        if profile_data == CALENDAR_PROFILE_ALL:
+            entries, _, labels = self._load_all_profile_entries()
+            if 0 <= entry_index < len(entries):
+                profile = labels[entry_index]
+                # The entries returned by _load_all_profile_entries are references to 
+                # the same dicts in self._entries_by_profile[profile]
+                entries[entry_index]["label"] = new_label
+                profile_entries = self._load_entries_for_profile(profile)
+                self._parent._rewrite_log_file(profile_entries, {}, path=self._parent._profile_file_path(profile))
+        else:
+            entries = self._load_entries_for_profile(profile_data)
+            if 0 <= entry_index < len(entries):
+                entries[entry_index]["label"] = new_label
+                self._parent._rewrite_log_file(entries, {}, path=self._parent._profile_file_path(profile_data))
+        self._sync_calendar()
 
     def _monday_for_date(self, date: QDate) -> QDate:
         if not date.isValid():
@@ -2340,7 +2661,9 @@ class CalendarViewDialog(QDialog):
         self._sync_calendar_scale_initial()
 
     def _sync_calendar(self) -> None:
+        self.calendar_widget.undo_available = bool(self._parent._deletion_history)
         profile_data = self.profile_combo.currentData()
+
         if not profile_data:
             return
         self._save_profile_selection()
@@ -2410,6 +2733,8 @@ class TrendsGraphWidget(QWidget):
         self._hover_index: Optional[int] = None
         self._point_count = 7
         self._dot_radius = 4
+        self._range_end = QDate.currentDate()
+        self._year_anchor: Optional[int] = None
         self.setMinimumHeight(240)
         self.setMinimumWidth(420)
         self.setMouseTracking(True)
@@ -2420,11 +2745,52 @@ class TrendsGraphWidget(QWidget):
             return
         self._scale = scale
         self._range_days = max(1, int(range_days))
-        self._point_count = 12 if self._scale == "year" else self._range_days
+        if self._scale == "year":
+            self._point_count = 12
+        elif self._is_year_range():
+            if self._year_anchor is None:
+                self._year_anchor = QDate.currentDate().year()
+            self._point_count = self._year_range_point_count(self._year_anchor)
+            self._range_end = QDate(self._year_anchor, 12, 31)
+        else:
+            self._year_anchor = None
+            self._point_count = self._range_days
+            self._range_end = min(self._range_end, QDate.currentDate())
         self.update()
 
     def point_count(self) -> int:
         return self._point_count
+
+    def can_shift_forward(self) -> bool:
+        if self._is_year_range():
+            current_year = QDate.currentDate().year()
+            anchor = self._year_anchor or current_year
+            return anchor < current_year
+        return self._range_end < QDate.currentDate()
+
+    def shift_range(self, direction: int) -> None:
+        if direction == 0:
+            return
+        if self._is_year_range():
+            if self._year_anchor is None:
+                self._year_anchor = QDate.currentDate().year()
+            self._year_anchor += direction
+            current_year = QDate.currentDate().year()
+            if self._year_anchor > current_year:
+                self._year_anchor = current_year
+            self._range_end = QDate(self._year_anchor, 12, 31)
+            self._point_count = self._year_range_point_count(self._year_anchor)
+            self.update()
+            return
+        if self._scale == "year":
+            next_end = self._range_end.addMonths(12 * direction)
+        else:
+            next_end = self._range_end.addDays(self._range_days * direction)
+        today = QDate.currentDate()
+        if next_end > today:
+            next_end = today
+        self._range_end = next_end
+        self.update()
 
     def set_enabled_labels(self, labels: set[str]) -> None:
         self._enabled_labels = set(labels)
@@ -2444,13 +2810,44 @@ class TrendsGraphWidget(QWidget):
         return rest + active if active else list(series)
 
     def _build_daily_dates(self, days: int) -> list[QDate]:
-        end = QDate.currentDate()
+        if self._is_year_range():
+            year = self._year_anchor or QDate.currentDate().year()
+            start = QDate(year, 1, 1)
+            today = QDate.currentDate()
+            if year > today.year():
+                return []
+            if year == today.year():
+                total_days = today.dayOfYear()
+            else:
+                total_days = self._year_length(year)
+            return [start.addDays(offset) for offset in range(total_days)]
+        end = self._range_end
         start = end.addDays(-(days - 1))
         dates: list[QDate] = []
         for offset in range(days):
             date = start.addDays(offset)
             dates.append(date)
         return dates
+
+    def _year_length(self, year: int) -> int:
+        if (year % 4) != 0:
+            return 365
+        if (year % 100) != 0:
+            return 366
+        if (year % 400) == 0:
+            return 366
+        return 365
+
+    def _year_range_point_count(self, year: int) -> int:
+        today = QDate.currentDate()
+        if year == today.year():
+            return today.dayOfYear()
+        if year > today.year():
+            return 0
+        return self._year_length(year)
+
+    def _is_year_range(self) -> bool:
+        return self._scale in ("week", "month") and self._range_days >= 365
 
     def _values_for_dates(
         self, totals: dict[str, int], dates: list[QDate]
@@ -2465,7 +2862,7 @@ class TrendsGraphWidget(QWidget):
         return values
 
     def _build_month_dates(self) -> list[QDate]:
-        end = QDate.currentDate()
+        end = self._range_end
         start = QDate(end.year(), end.month(), 1).addMonths(-11)
         return [start.addMonths(offset) for offset in range(12)]
 
@@ -2498,6 +2895,14 @@ class TrendsGraphWidget(QWidget):
         if self._scale == "year":
             return date.toString("MMM yyyy")
         return date.toString("yyyy-MM-dd")
+
+    def _range_label_format(self) -> str:
+        fmt = (self._settings.graph_range_date_format or "mm/dd/yy").lower()
+        return {
+            "mm/dd/yy": "MM/dd/yy",
+            "yy/mm/dd": "yy/MM/dd",
+            "dd/mm/yy": "dd/MM/yy",
+        }.get(fmt, "MM/dd/yy")
 
     def _format_duration(self, seconds: int) -> str:
         seconds = max(0, int(seconds))
@@ -2655,6 +3060,31 @@ class TrendsGraphWidget(QWidget):
         painter.setPen(QPen(axis_color, 1.2))
         painter.drawLine(plot_rect.bottomLeft(), plot_rect.bottomRight())
 
+        if dates:
+            date_format = self._range_label_format()
+            range_label = (
+                f"{dates[0].toString(date_format)}–"
+                f"{dates[-1].toString(date_format)}"
+            )
+            label_font = QFont(base_font)
+            point_size = label_font.pointSize()
+            if point_size > 0:
+                label_font.setPointSize(max(8, point_size - 1))
+            else:
+                pixel_size = label_font.pixelSize()
+                if pixel_size > 0:
+                    label_font.setPixelSize(max(8, pixel_size - 1))
+            painter.setFont(label_font)
+            label_color = QColor(self._settings.text_color)
+            label_color.setAlpha(190)
+            painter.setPen(label_color)
+            metrics = painter.fontMetrics()
+            text_width = metrics.horizontalAdvance(range_label)
+            x = int(plot_rect.right() - text_width)
+            y = int(plot_rect.top() - 4 + metrics.ascent())
+            painter.drawText(x, y, range_label)
+            painter.setFont(base_font)
+
         ordered_series = self._series_order()
         for series in ordered_series:
             values = values_by_series.get(series.label, [])
@@ -2774,7 +3204,7 @@ class TrendsGraphWidget(QWidget):
             return
         self._hover_index = closest_index
         QToolTip.showText(
-            event.globalPos(),
+            event.globalPosition().toPoint(),
             self._tooltip_text(closest_index),
             self,
         )
@@ -2783,6 +3213,135 @@ class TrendsGraphWidget(QWidget):
         self._hover_index = None
         QToolTip.hideText()
         super().leaveEvent(event)
+
+
+class AchievementsDialog(QDialog):
+    def __init__(self, parent: "CountdownWindow", ui_settings: UiSettings) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Achievements")
+        self.setModal(True)
+        self._parent = parent
+        self._settings = ui_settings
+
+        layout = QVBoxLayout()
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["Achievement", "Status"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.verticalHeader().hide()
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionMode(QTableWidget.NoSelection)
+        layout.addWidget(self.table)
+
+        self._populate_list()
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+
+        self.setLayout(layout)
+        self.resize(500, 400)
+
+    def _populate_list(self) -> None:
+        longest, current = self._parent._calculate_streaks()
+        self.table.setRowCount(len(ACHIEVEMENT_DEFINITIONS))
+        
+        settings = get_settings()
+        notified_key = f"achievements/{self._parent._active_profile}/notified"
+        notified_str = str(settings.value(notified_key, ""))
+        notified = set(notified_str.split(",")) if notified_str else set()
+
+        for i, ach in enumerate(ACHIEVEMENT_DEFINITIONS):
+            unlocked = False
+            if ach.id.startswith("streak_"):
+                unlocked = longest >= ach.days
+            else:
+                unlocked = ach.id in notified
+
+            name_text = f"{ach.label} {ach.happy}" if unlocked else ach.label
+            name_item = QTableWidgetItem(name_text)
+            
+            status_text = "Unlocked" if unlocked else "Locked"
+            status_item = QTableWidgetItem(status_text)
+            status_item.setTextAlignment(Qt.AlignCenter)
+            
+            if not unlocked:
+                name_item.setForeground(QColor(150, 150, 150))
+                status_item.setForeground(QColor(150, 150, 150))
+            
+            self.table.setItem(i, 0, name_item)
+            self.table.setItem(i, 1, status_item)
+
+
+class AddBlockDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        profiles: list[str],
+        default_profile: str,
+        default_date: QDate,
+        default_time: QTime,
+        ui_settings: UiSettings,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add Time Block")
+        self.setModal(True)
+        self._settings = ui_settings
+
+        layout = QFormLayout()
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItems(profiles)
+        if default_profile in profiles:
+            self.profile_combo.setCurrentText(default_profile)
+        layout.addRow("Profile:", self.profile_combo)
+
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDate(default_date)
+        layout.addRow("Date:", self.date_edit)
+
+        self.time_edit = QTimeEdit()
+        self.time_edit.setTime(default_time)
+        layout.addRow("Start Time:", self.time_edit)
+
+        duration_layout = QHBoxLayout()
+        self.hour_spin = QSpinBox()
+        self.hour_spin.setRange(0, 23)
+        self.hour_spin.setValue(1)
+        self.hour_spin.setSuffix(" h")
+        
+        self.minute_spin = QSpinBox()
+        self.minute_spin.setRange(0, 59)
+        self.minute_spin.setValue(0)
+        self.minute_spin.setSuffix(" m")
+        
+        duration_layout.addWidget(self.hour_spin)
+        duration_layout.addWidget(self.minute_spin)
+        layout.addRow("Duration:", duration_layout)
+
+        self.label_edit = QLineEdit()
+        layout.addRow("Label:", self.label_edit)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+
+        main_layout = QVBoxLayout()
+        main_layout.addLayout(layout)
+        main_layout.addWidget(self.buttons)
+        self.setLayout(main_layout)
+
+    def get_data(self) -> dict[str, object]:
+        duration_seconds = (self.hour_spin.value() * 3600) + (self.minute_spin.value() * 60)
+        return {
+            "profile": self.profile_combo.currentText(),
+            "date": self.date_edit.date(),
+            "start_time": self.time_edit.time(),
+            "duration": duration_seconds,
+            "label": self.label_edit.text(),
+        }
 
 
 class GraphDialog(QDialog):
@@ -2827,17 +3386,38 @@ class GraphDialog(QDialog):
         self.scale_combo = QComboBox()
         self.scale_combo.addItems(["Week", "Month", "Year"])
         self.range_combo = QComboBox()
-        self.range_combo.addItems(["7 days", "30 days"])
+        self.range_combo.addItems(["7 days", "30 days", "Year"])
+
+        self.prev_btn = QPushButton("<")
+        self.prev_btn.setFixedWidth(28)
+        self.prev_btn.setToolTip("Previous range")
+        self.next_btn = QPushButton(">")
+        self.next_btn.setFixedWidth(28)
+        self.next_btn.setToolTip("Next range")
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setRange(50, 200)
+        self.zoom_slider.setValue(100)
+        self.zoom_value = QLabel("100%")
 
         self.scale_combo.currentTextChanged.connect(self._sync_graph)
         self.range_combo.currentTextChanged.connect(self._sync_graph)
+        self.prev_btn.clicked.connect(lambda: self._shift_range(-1))
+        self.next_btn.clicked.connect(lambda: self._shift_range(1))
+        self.zoom_slider.valueChanged.connect(self._sync_zoom)
 
         controls = QHBoxLayout()
+        controls.addWidget(self.prev_btn)
+        controls.addWidget(self.next_btn)
+        controls.addSpacing(12)
         controls.addWidget(QLabel("Scale"))
         controls.addWidget(self.scale_combo)
         controls.addSpacing(12)
         controls.addWidget(QLabel("Range"))
         controls.addWidget(self.range_combo)
+        controls.addSpacing(12)
+        controls.addWidget(QLabel("Zoom"))
+        controls.addWidget(self.zoom_slider)
+        controls.addWidget(self.zoom_value)
         controls.addStretch(1)
 
         legend_group = QGroupBox("Legend")
@@ -2883,6 +3463,8 @@ class GraphDialog(QDialog):
         layout.addLayout(footer)
         self.setLayout(layout)
 
+        self._restore_graph_controls()
+        self._sync_zoom_label()
         self._sync_series_filter()
         self._sync_graph()
 
@@ -2891,17 +3473,31 @@ class GraphDialog(QDialog):
         range_text = self.range_combo.currentText()
         range_days = 7
         if range_text:
-            try:
-                range_days = int(range_text.split()[0])
-            except (TypeError, ValueError):
-                range_days = 7
+            if range_text.strip().lower() == "year":
+                range_days = 365
+            else:
+                try:
+                    range_days = int(range_text.split()[0])
+                except (TypeError, ValueError):
+                    range_days = 7
         if scale == "year":
-            self.range_combo.setEnabled(False)
             range_days = 365
-        else:
-            self.range_combo.setEnabled(True)
         self.graph.set_scale(scale, range_days)
         self._update_graph_width()
+        self._update_nav_buttons()
+        self._save_graph_controls()
+
+    def _shift_range(self, direction: int) -> None:
+        self.graph.shift_range(direction)
+        self._update_nav_buttons()
+
+    def _sync_zoom(self) -> None:
+        self._sync_zoom_label()
+        self._update_graph_width()
+        self._save_graph_controls()
+
+    def _sync_zoom_label(self) -> None:
+        self.zoom_value.setText(f"{self.zoom_slider.value()}%")
 
     def _sync_series_filter(self) -> None:
         enabled = {
@@ -2931,8 +3527,52 @@ class GraphDialog(QDialog):
             if point_count <= 7
             else int(base_width * (point_count / 7))
         )
-        self.graph.setFixedWidth(target_width)
+        zoom_scale = max(0.25, self.zoom_slider.value() / 100)
+        self.graph.setFixedWidth(max(1, int(target_width * zoom_scale)))
         self.graph.setFixedHeight(viewport_height)
+        self._update_nav_buttons()
+
+    def _update_nav_buttons(self) -> None:
+        self.next_btn.setEnabled(self.graph.can_shift_forward())
+
+    def _restore_graph_controls(self) -> None:
+        settings = get_settings()
+        scale = settings.value("graph/scale", "week")
+        if isinstance(scale, str):
+            scale = scale.strip().lower()
+        scale_map = {"week": "Week", "month": "Month", "year": "Year"}
+        scale_label = scale_map.get(scale, "Week")
+        scale_index = self.scale_combo.findText(scale_label)
+        if scale_index >= 0:
+            self.scale_combo.blockSignals(True)
+            self.scale_combo.setCurrentIndex(scale_index)
+            self.scale_combo.blockSignals(False)
+
+        range_label = settings.value("graph/range", "7 days")
+        if isinstance(range_label, str):
+            range_label = range_label.strip()
+        range_index = self.range_combo.findText(range_label)
+        if range_index >= 0:
+            self.range_combo.blockSignals(True)
+            self.range_combo.setCurrentIndex(range_index)
+            self.range_combo.blockSignals(False)
+
+        zoom_value = settings.value("graph/zoom", 100)
+        try:
+            zoom_value = int(zoom_value)
+        except (TypeError, ValueError):
+            zoom_value = 100
+        zoom_value = max(50, min(200, zoom_value))
+        self.zoom_slider.blockSignals(True)
+        self.zoom_slider.setValue(zoom_value)
+        self.zoom_slider.blockSignals(False)
+
+    def _save_graph_controls(self) -> None:
+        settings = get_settings()
+        settings.setValue("graph/scale", self.scale_combo.currentText().lower())
+        settings.setValue("graph/range", self.range_combo.currentText())
+        settings.setValue("graph/zoom", int(self.zoom_slider.value()))
+        settings.sync()
 
 
 class LogsCalendarWidget(QCalendarWidget):
@@ -3320,6 +3960,7 @@ class CountdownWindow(QMainWindow):
         self._xinput_prev_buttons = 0
         self._xinput_start_mask = 0
         self._xinput_clock_mask = 0
+        self._deletion_history: list[tuple[str, dict[str, object]]] = []
 
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
@@ -3515,6 +4156,7 @@ class CountdownWindow(QMainWindow):
         reset_time = QAction("Reset Timer", self)
         settings = QAction("Settings", self)
         hotkey_settings = QAction("Hotkey Settings", self)
+        achievements = QAction("Achievements", self)
         quit_action = QAction("Quit", self)
         set_time.triggered.connect(self._open_set_time)
         add_time.triggered.connect(self._open_add_time)
@@ -3529,6 +4171,7 @@ class CountdownWindow(QMainWindow):
         reset_time.triggered.connect(self._reset_timer)
         settings.triggered.connect(self._open_settings)
         hotkey_settings.triggered.connect(self._open_hotkey_settings)
+        achievements.triggered.connect(self._open_achievements)
         quit_action.triggered.connect(self._quit_app)
         visibility_menu = menu.addMenu("Show/Hide UI")
         self._add_visibility_action(
@@ -3575,6 +4218,7 @@ class CountdownWindow(QMainWindow):
         time_menu.addAction(reset_time)
 
         data_menu = menu.addMenu("Data")
+        data_menu.addAction(achievements)
         data_menu.addAction(calendar_view)
         data_menu.addAction(logs)
         data_menu.addAction(trends_graph)
@@ -3720,6 +4364,119 @@ class CountdownWindow(QMainWindow):
         dialog = CalendarViewDialog(self, self.settings)
         dialog.exec()
 
+    def _delete_log_entry(self, profile_label: str, entry: dict[str, object]) -> None:
+        """Removes a log entry from the specified profile and persists changes."""
+        path = self._profile_file_path(profile_label)
+        fallback_goal = self._load_profile_super_goal_seconds(profile_label)
+        entries, _, goals = self._load_log_entries_from_path(
+            path, fallback_goal_seconds=fallback_goal
+        )
+        
+        # Find and remove the entry
+        removed = False
+        for i, existing in enumerate(entries):
+            # Compare key fields to find the match
+            if (str(existing.get("date")) == str(entry.get("date")) and 
+                str(existing.get("start_time")) == str(entry.get("start_time")) and 
+                str(existing.get("end_time")) == str(entry.get("end_time")) and
+                str(existing.get("duration_seconds")) == str(entry.get("duration_seconds"))):
+                
+                # Store in history before removing
+                self._deletion_history.append((profile_label, entries[i]))
+                if len(self._deletion_history) > 5:
+                    self._deletion_history.pop(0)
+                
+                entries.pop(i)
+                removed = True
+                break
+        
+        if not removed:
+            self.status_label.setText(f"Delete failed: entry not found in {profile_label}")
+            return
+
+        # Rewrite the log file for that profile
+        self._rewrite_log_file(entries, goals, path=path)
+        
+        # If it's the active profile, reload everything to sync main UI
+        if profile_label == self._active_profile:
+            (
+                self.log_entries,
+                self.daily_totals,
+                self.daily_goals,
+            ) = self._load_log_entries()
+            self._refresh_heatmap()
+            self._update_total_today_label()
+            self.status_label.setText(f"Deleted block from {profile_label}")
+        else:
+            self.status_label.setText(f"Deleted block from {profile_label}")
+
+    def _undo_delete_log_entry(self) -> None:
+        """Restores the last deleted block from history."""
+        if not self._deletion_history:
+            self.status_label.setText("No deleted blocks to undo")
+            return
+            
+        profile_label, entry = self._deletion_history.pop()
+        date_key = str(entry.get("date"))
+        start_time = str(entry.get("start_time"))
+        end_time = str(entry.get("end_time"))
+        duration = int(entry.get("duration_seconds", 0))
+        goal_seconds = int(entry.get("goal_seconds", 0))
+        label = str(entry.get("label", ""))
+        
+        # Append back to CSV
+        path = self._profile_file_path(profile_label)
+        self._ensure_data_file_path(path)
+        with open(path, "a", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow([date_key, start_time, end_time, duration, goal_seconds, label])
+            
+        # If it's the active profile, reload main UI
+        if profile_label == self._active_profile:
+            (
+                self.log_entries,
+                self.daily_totals,
+                self.daily_goals,
+            ) = self._load_log_entries()
+            self._refresh_heatmap()
+            self._update_total_today_label()
+            
+        self.status_label.setText(f"Restored deleted block to {profile_label}")
+
+    def _add_manual_log_entry(
+        self,
+        profile_label: str,
+        date: QDate,
+        start_time: QTime,
+        duration_seconds: int,
+        label: str,
+    ) -> None:
+        """Manually adds a log entry to a profile's CSV."""
+        date_key = self._date_key(date)
+        start_str = start_time.toString("HH:mm:ss")
+        end_time = start_time.addSecs(duration_seconds)
+        end_str = end_time.toString("HH:mm:ss")
+        goal_seconds = self._goal_seconds_for_date(date_key)
+
+        path = self._profile_file_path(profile_label)
+        self._ensure_data_file_path(path)
+        with open(path, "a", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow([date_key, start_str, end_str, duration_seconds, goal_seconds, label])
+
+        if profile_label == self._active_profile:
+            (
+                self.log_entries,
+                self.daily_totals,
+                self.daily_goals,
+            ) = self._load_log_entries()
+            self._refresh_heatmap()
+            self._update_total_today_label()
+
+        self.status_label.setText(f"Added manual entry to {profile_label}")
+
+
+
     def _graph_series(self) -> list[GraphSeries]:
         series: list[GraphSeries] = []
         for label in self._profile_labels():
@@ -3746,6 +4503,10 @@ class CountdownWindow(QMainWindow):
         dialog = GraphDialog(
             self, self._graph_series(), self.settings, self._active_profile
         )
+        dialog.exec()
+
+    def _open_achievements(self) -> None:
+        dialog = AchievementsDialog(self, self.settings)
         dialog.exec()
 
     def _open_profile_editor(self) -> None:
@@ -4403,6 +5164,52 @@ class CountdownWindow(QMainWindow):
         self.current_streak_label.setText(
             f"Current streak: {current} {current_label}"
         )
+        self._check_achievements(current)
+
+    def _check_achievements(self, current_streak: int) -> None:
+        settings = get_settings()
+        notified_key = f"achievements/{self._active_profile}/notified"
+        notified_val = settings.value(notified_key)
+        
+        # If notified_val is None, this is the first time checking achievements for this profile.
+        # We initialize the notified list with everything already met but don't show toasts.
+        is_first_check = notified_val is None
+        notified_str = str(notified_val) if notified_val is not None else ""
+        notified = set(notified_str.split(",")) if notified_str else set()
+
+        new_notified = False
+        longest, _ = self._calculate_streaks()
+
+        for ach in ACHIEVEMENT_DEFINITIONS:
+            if ach.id in notified:
+                continue
+
+            met = False
+            if ach.id.startswith("streak_"):
+                if current_streak >= ach.days:
+                    met = True
+            elif ach.id == "missed_day":
+                if current_streak == 0 and longest > 0:
+                    met = True
+            elif ach.id == "back_on_track":
+                if current_streak == 1 and "missed_day" in notified:
+                    met = True
+
+            if met:
+                notified.add(ach.id)
+                new_notified = True
+                # Only show toast if it's NOT the very first initialization check
+                if not is_first_check:
+                    toast = ToastNotification(
+                        "Achievement Unlocked!",
+                        f"{ach.label} {ach.happy}",
+                        parent=self
+                    )
+                    toast.show_toast()
+
+        if new_notified or is_first_check:
+            settings.setValue(notified_key, ",".join(sorted(notified)))
+            settings.sync()
 
     def _toggle_always_on_top(self, enabled: bool, save: bool = True) -> None:
         try:
@@ -4745,6 +5552,16 @@ class CountdownWindow(QMainWindow):
             ),
             ui.graph_grid_color,
         )
+        graph_range_format = settings.value(
+            "graph/range_date_format", ui.graph_range_date_format
+        )
+        if isinstance(graph_range_format, str):
+            graph_range_format = graph_range_format.strip().lower()
+        if graph_range_format in ("mm-dd-yy", "yy-mm-dd", "dd-mm-yy"):
+            graph_range_format = graph_range_format.replace("-", "/")
+        if graph_range_format not in ("mm/dd/yy", "yy/mm/dd", "dd/mm/yy"):
+            graph_range_format = ui.graph_range_date_format
+        ui.graph_range_date_format = graph_range_format
         ui.heatmap_cell_size = int(
             settings.value("heatmap/cell_size", ui.heatmap_cell_size)
         )
@@ -5011,11 +5828,13 @@ class CountdownWindow(QMainWindow):
             has_start_time = "start_time" in reader.fieldnames
             has_end_time = "end_time" in reader.fieldnames
             has_goal_seconds = "goal_seconds" in reader.fieldnames
+            has_label = "label" in reader.fieldnames
             needs_migration = (
                 "time" in reader.fieldnames
                 or not has_start_time
                 or not has_end_time
                 or not has_goal_seconds
+                or not has_label
             )
             if fallback_goal_seconds is None:
                 fallback_goal_seconds = self.super_goal_seconds
@@ -5041,6 +5860,7 @@ class CountdownWindow(QMainWindow):
                     else row.get("time")
                 )
                 end_time = row.get("end_time") if has_end_time else None
+                user_label = row.get("label", "") if has_label else ""
                 if not start_time:
                     start_time = "N/A"
                 if not end_time and start_time not in ("N/A", ""):
@@ -5056,6 +5876,7 @@ class CountdownWindow(QMainWindow):
                         "end_time": end_time,
                         "duration_seconds": duration,
                         "goal_seconds": goal_seconds,
+                        "label": user_label,
                     }
                 )
                 totals[date_key] = totals.get(date_key, 0) + duration
@@ -5140,11 +5961,12 @@ class CountdownWindow(QMainWindow):
         end_time: str,
         duration: int,
         goal_seconds: int,
+        label: str = "",
     ) -> None:
         self._ensure_data_file()
         with open(self._data_file_path, "a", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow([date_key, start_time, end_time, duration, goal_seconds])
+            writer.writerow([date_key, start_time, end_time, duration, goal_seconds, label])
 
     def _append_goal_update(self, date_key: str, goal_seconds: int) -> None:
         self._append_log_entry(date_key, "goal", "goal", 0, goal_seconds)
@@ -5160,7 +5982,7 @@ class CountdownWindow(QMainWindow):
         with open(target_path, "w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(
-                ["date", "start_time", "end_time", "duration_seconds", "goal_seconds"]
+                ["date", "start_time", "end_time", "duration_seconds", "goal_seconds", "label"]
             )
             for entry in entries:
                 date_key = entry["date"]
@@ -5174,6 +5996,7 @@ class CountdownWindow(QMainWindow):
                         entry.get("end_time", "N/A"),
                         entry["duration_seconds"],
                         goal_seconds,
+                        entry.get("label", ""),
                     ]
                 )
 
@@ -5501,6 +6324,9 @@ class CountdownWindow(QMainWindow):
         )
         settings.setValue(
             "colors/graph_grid", qcolor_to_hex(self.settings.graph_grid_color)
+        )
+        settings.setValue(
+            "graph/range_date_format", self.settings.graph_range_date_format
         )
         settings.setValue("heatmap/cell_size", self.settings.heatmap_cell_size)
         settings.setValue(
